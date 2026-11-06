@@ -1,0 +1,12 @@
+langgraph
+langchain
+langchain-community
+langchain-openai
+python-dotenv
+pydantic
+requests
+pandas
+pymupdf
+chromadb
+sentence-transformers
+matplotlib
