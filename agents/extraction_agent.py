@@ -1,4 +1,3 @@
-
 import os
 from dotenv import load_dotenv
 
@@ -220,8 +219,9 @@ def extract_paper_information(paper, retriever=None, protocol=None):
         extraction_source = "full_text_rag"
 
     else:
-        full_text_evidence = "No full-text passages available."
-        extraction_source = "abstract"
+        raise ValueError(
+            "No full-text evidence retrieved for an eligible paper."
+        )
 
     dimensions = (protocol or {}).get(
         "extraction_dimensions", []

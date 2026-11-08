@@ -1,3 +1,4 @@
+
 def calculate_prisma_data(state):
     """Calculate PRISMA flow counts from the review workflow state."""
 
@@ -5,14 +6,36 @@ def calculate_prisma_data(state):
     unique = state.get("unique_papers", [])
     screened = state.get("screening_results", [])
 
-    excluded = state.get("excluded_papers", [])
-    included_after_screening = state.get("included_papers", [])
-    uncertain = state.get("uncertain_papers", [])
+    # Separate completed screening decisions from technical failures.
+    completed_screening = [
+        paper for paper in screened
+        if paper.get("screening_status", "completed") == "completed"
+    ]
+
+    technical_failures = [
+        paper for paper in screened
+        if paper.get("screening_status") == "technical_error"
+    ]
+
+    excluded = [
+        paper for paper in completed_screening
+        if paper.get("screening_decision") == "Exclude"
+    ]
+
+    included_after_screening = [
+        paper for paper in completed_screening
+        if paper.get("screening_decision") == "Include"
+    ]
+
+    uncertain = [
+        paper for paper in completed_screening
+        if paper.get("screening_decision") == "Uncertain"
+    ]
 
     # Initial screening statistics
     identified_count = len(retrieved)
     unique_count = len(unique)
-    screened_count = len(screened)
+    screened_count = len(completed_screening)
 
     # Full-text retrieval statistics
     pdf_results = state.get("pdf_retrieval_results", [])
@@ -27,7 +50,9 @@ def calculate_prisma_data(state):
         ]
     )
 
-    reports_not_retrieved = reports_sought - reports_retrieved
+    reports_not_retrieved = max(
+        0, reports_sought - reports_retrieved
+    )
 
     # Full-text eligibility statistics
     full_text_results = state.get("full_text_assessment_results", [])
@@ -54,7 +79,6 @@ def calculate_prisma_data(state):
 
     for paper in full_text_excluded:
         reason = paper.get("reason", "Reason not specified")
-
         exclusion_reasons[reason] = (
             exclusion_reasons.get(reason, 0) + 1
         )
@@ -71,6 +95,7 @@ def calculate_prisma_data(state):
         "records_excluded": len(excluded),
         "records_included_after_screening": len(included_after_screening),
         "records_uncertain": len(uncertain),
+        "records_with_technical_failures": len(technical_failures),
 
         # Full-text retrieval
         "reports_sought_for_retrieval": reports_sought,

@@ -1,4 +1,3 @@
-
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 
@@ -53,11 +52,11 @@ IMPORTANT RULES:
 
 Return valid JSON with exactly these keys:
 
-{
+{{
     "decision": "Include, Exclude, or Uncertain",
     "reason": "Explanation of the eligibility decision.",
     "evidence_pages": [1, 3]
-}"""
+}}"""
     ),
     (
         "human",
@@ -87,7 +86,7 @@ Assess this paper's eligibility."""
 eligibility_chain = eligibility_prompt | llm | parser
 
 
-def assess_paper_full_text(paper, retriever, protocol):
+def assess_paper_full_text(paper, retriever, protocol, topic):
     """Assess one paper using its retrieved full-text passages."""
 
     pdf_path = paper.get("pdf_path")
@@ -140,7 +139,7 @@ def assess_paper_full_text(paper, retriever, protocol):
     )
 
     result = eligibility_chain.invoke({
-        "topic": protocol.get("topic", "Not specified"),
+        "topic": topic,
         "research_question": protocol.get(
             "research_question", "Not specified"
         ),
@@ -220,7 +219,8 @@ def run_full_text_eligibility_agent(state):
             assessment = assess_paper_full_text(
                 paper,
                 retriever,
-                protocol
+                protocol,
+                state.get("topic", "Not specified")
             )
 
         except Exception as error:

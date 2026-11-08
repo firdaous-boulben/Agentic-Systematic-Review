@@ -4,7 +4,7 @@ from langchain_openai import ChatOpenAI
 
 load_dotenv()
 
-def get_llm():
+def get_llm(max_tokens=2000):
     api_key = os.getenv("OPENROUTER_API_KEY")
     model = os.getenv("OPENROUTER_MODEL")
 
@@ -19,5 +19,5 @@ def get_llm():
         openai_api_key=api_key.strip(),
         openai_api_base="https://openrouter.ai/api/v1",
         temperature=0,
-        max_tokens=2000
+        max_tokens=max_tokens
     )

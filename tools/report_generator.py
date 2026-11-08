@@ -112,16 +112,58 @@ def generate_review_report(
             f"\n**PRISMA flow diagram:** `{diagram_path}`"
         )
 
+    
     # 5. Title and abstract screening
+    screening_results = state.get("screening_results", [])
+
+    completed_screening = [
+        paper for paper in screening_results
+        if paper.get("screening_status") == "completed"
+    ]
+
+    technical_failures = [
+        paper for paper in screening_results
+        if paper.get("screening_status") == "technical_error"
+    ]
+
+    included = [
+        paper for paper in completed_screening
+        if paper.get("screening_decision") == "Include"
+    ]
+
+    excluded = [
+        paper for paper in completed_screening
+        if paper.get("screening_decision") == "Exclude"
+    ]
+
+    uncertain = [
+        paper for paper in completed_screening
+        if paper.get("screening_decision") == "Uncertain"
+    ]
+
     screening_summary = [
-        f"- Records screened: {len(state.get('screening_results', []))}",
-        f"- Potentially included: {len(state.get('included_papers', []))}",
-        f"- Excluded: {len(state.get('excluded_papers', []))}",
-        f"- Uncertain: {len(state.get('uncertain_papers', []))}",
+        f"- Records received for screening: {len(screening_results)}",
+        f"- Successfully screened: {len(completed_screening)}",
+        f"- Potentially included: {len(included)}",
+        f"- Excluded: {len(excluded)}",
+        f"- Genuine uncertain decisions: {len(uncertain)}",
+        f"- Technical failures requiring retry: {len(technical_failures)}",
         f"- Human approval: {human_approval}"
     ]
 
+    if technical_failures:
+        screening_summary.append(
+            "\n### Papers with Technical Screening Failures"
+        )
+
+        for paper in technical_failures:
+            screening_summary.append(
+                f"- **{paper.get('title', 'Untitled')}**: "
+                f"{paper.get('screening_reason', 'Technical error')}"
+            )
+
     section("5. Title and Abstract Screening", "\n".join(screening_summary))
+
 
     # 6. Full-text retrieval
     retrieval_results = state.get("pdf_retrieval_results", [])
@@ -282,7 +324,7 @@ def generate_review_report(
         "Papers without accessible PDFs could not undergo full-text eligibility assessment.",
         "LLM-assisted screening, extraction, appraisal, and synthesis require human verification.",
         "The quality appraisal uses general assessment dimensions and does not yet integrate validated study-type-specific appraisal instruments.",
-        "Uncertain records and reports require further human review.",
+        "Genuine uncertain records require human review, while technical screening failures must be retried before finalizing the review.",
         "The generated report and PRISMA diagram should be checked against the underlying records before publication."
     ]
 
