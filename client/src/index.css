@@ -1957,6 +1957,95 @@ a {
   color: #d94c4c;
 }
 
+.screening-agreement,
+.screening-adjudication {
+  margin-top: 24px;
+  padding: 20px;
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: 12px;
+  background: var(--card-background, #fff);
+}
+
+.screening-agreement-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.section-heading,
+.reviewer-assessment-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.reviewer-assessments {
+  margin-top: 24px;
+}
+
+.reviewer-assessment {
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: 8px;
+}
+
+.reviewer-assessment p,
+.adjudication-paper p {
+  margin: 8px 0 0;
+}
+
+.screening-note {
+  display: block;
+  margin-top: 10px;
+  color: #6b7280;
+  font-size: 0.875rem;
+}
+
+.screening-warning {
+  margin-top: 16px;
+  padding: 12px;
+  border-radius: 8px;
+  background: #fff7ed;
+  color: #9a3412;
+}
+
+.adjudication-list {
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.adjudication-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 20px;
+  padding: 16px;
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: 8px;
+}
+
+.adjudication-paper {
+  flex: 1;
+  min-width: 0;
+}
+
+.adjudication-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+@media (max-width: 768px) {
+  .adjudication-item {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+
 .paper-review,
 .screening-sidebar {
   background: #fff;

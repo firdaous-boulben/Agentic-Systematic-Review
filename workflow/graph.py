@@ -53,91 +53,185 @@ def screening_node(state: ReviewState):
     return run_screening_agent(state)
 
 def human_review_node(state: ReviewState):
+    uncertain_papers = state.get("uncertain_papers", [])
 
-    decision = interrupt({
+    interrupt_payload = {
         "message": (
-            "Review the screening results. Approve or reject the screening, "
-            "and resolve uncertain papers where possible."
+            "Review the dual-screening results. Approve or reject the "
+            "screening, and resolve disagreements or uncertain papers."
         ),
-
+        "screening_agreement": state.get("screening_agreement", {}),
+        "screening_disagreements": [
+            {
+                "screening_paper_id": p.get("screening_paper_id"),
+                "openalex_id": p.get("openalex_id"),
+                "doi": p.get("doi"),
+                "title": p.get("title"),
+                "reviewer_assessments": p.get("reviewer_assessments", {}),
+                "screening_reason": p.get("screening_reason"),
+            }
+            for p in state.get("screening_disagreements", [])
+        ],
         "included_papers": [
-            {"title": p["title"], "reason": p["screening_reason"]}
+            {
+                "screening_paper_id": p.get("screening_paper_id"),
+                "title": p.get("title"),
+                "reason": p.get("screening_reason"),
+            }
             for p in state.get("included_papers", [])
         ],
-
         "excluded_papers": [
-            {"title": p["title"], "reason": p["screening_reason"]}
+            {
+                "screening_paper_id": p.get("screening_paper_id"),
+                "title": p.get("title"),
+                "reason": p.get("screening_reason"),
+            }
             for p in state.get("excluded_papers", [])
         ],
-
         "uncertain_papers": [
             {
-                "title": p["title"],
+                "screening_paper_id": p.get("screening_paper_id"),
                 "openalex_id": p.get("openalex_id"),
-                "reason": p["screening_reason"]
+                "doi": p.get("doi"),
+                "title": p.get("title"),
+                "reason": p.get("screening_reason"),
+                "dual_screening_status": p.get("dual_screening_status"),
+                "reviewer_assessments": p.get("reviewer_assessments", {}),
             }
-            for p in state.get("uncertain_papers", [])
-        ]
-    })
+            for p in uncertain_papers
+        ],
+    }
 
-    # Support both a simple approval and detailed human decisions.
+    decision = interrupt(interrupt_payload)
+
     if isinstance(decision, dict):
         approved = decision.get("approved", False)
         uncertain_decisions = decision.get("uncertain_decisions", {})
     else:
-        approved = str(decision).lower() in ["yes", "y", "true", "approve"]
+        approved = str(decision).strip().lower() in [
+            "yes", "y", "true", "approve"
+        ]
         uncertain_decisions = {}
 
-    included = list(state.get("included_papers", []))
-    excluded = list(state.get("excluded_papers", []))
-    uncertain = []
+    if not isinstance(uncertain_decisions, dict):
+        uncertain_decisions = {}
 
-    for paper in state.get("uncertain_papers", []):
-        paper_id = paper.get("openalex_id")
-        paper_title = paper.get("title")
+    # Copy the screening results before applying human decisions.
+    screening_results = [
+        dict(paper)
+        for paper in state.get("screening_results", [])
+    ]
+
+    adjudication_results = list(
+        state.get("screening_adjudication_results", [])
+    )
+
+    resolved_decisions = {}
+
+    for paper in uncertain_papers:
+        paper_id = (
+            paper.get("screening_paper_id")
+            or paper.get("openalex_id")
+            or paper.get("doi")
+            or paper.get("title")
+        )
+
+        title = paper.get("title")
 
         human_decision = (
             uncertain_decisions.get(paper_id)
-            or uncertain_decisions.get(paper_title)
+            or uncertain_decisions.get(str(paper_id))
+            or uncertain_decisions.get(title)
             or "Uncertain"
         )
 
-        human_decision = str(human_decision).strip().lower()
+        human_decision = str(human_decision).strip().capitalize()
 
-        if human_decision == "include":
-            paper["screening_decision"] = "Include"
+        if human_decision not in ["Include", "Exclude", "Uncertain"]:
+            human_decision = "Uncertain"
+
+        if human_decision in ["Include", "Exclude"]:
+            resolved_decisions[str(paper_id)] = human_decision
+
+            adjudication_results.append({
+                "screening_paper_id": paper_id,
+                "openalex_id": paper.get("openalex_id"),
+                "doi": paper.get("doi"),
+                "title": title,
+                "reviewer_assessments": paper.get(
+                    "reviewer_assessments", {}
+                ),
+                "human_decision": human_decision,
+                "human_reason": (
+                    "Decision made during human adjudication."
+                ),
+                "previous_status": paper.get(
+                    "dual_screening_status"
+                ),
+            })
+
+    # Apply decisions to the master screening results.
+    for paper in screening_results:
+        paper_id = (
+            paper.get("screening_paper_id")
+            or paper.get("openalex_id")
+            or paper.get("doi")
+            or paper.get("title")
+        )
+
+        human_decision = resolved_decisions.get(str(paper_id))
+
+        if human_decision:
+            paper["screening_decision"] = human_decision
             paper["screening_reason"] = (
-                "Included following human review."
+                f"{human_decision} following human adjudication."
             )
-            included.append(paper)
+            paper["human_adjudicated"] = True
 
-        elif human_decision == "exclude":
-            paper["screening_decision"] = "Exclude"
-            paper["screening_reason"] = (
-                "Excluded following human review."
-            )
-            excluded.append(paper)
+    # Rebuild the decision groups from the updated results.
+    included = [
+        p for p in screening_results
+        if p.get("screening_decision") == "Include"
+    ]
 
-        else:
-            paper["screening_decision"] = "Uncertain"
-            uncertain.append(paper)
+    excluded = [
+        p for p in screening_results
+        if p.get("screening_decision") == "Exclude"
+    ]
+
+    uncertain = [
+        p for p in screening_results
+        if p.get("screening_decision") == "Uncertain"
+    ]
+
+    unresolved_disagreements = [
+        p for p in uncertain
+        if p.get("dual_screening_status") == "needs_adjudication"
+    ]
+
+    logs = add_execution_logs(
+        state.get("execution_logs", []),
+        (
+            "Human Review: Human review completed. "
+            f"{len(resolved_decisions)} papers adjudicated; "
+            f"{len(unresolved_disagreements)} disagreements "
+            f"remain unresolved. Approval: {approved}."
+        )
+    )
 
     return {
         "human_approval": bool(approved),
+        "screening_results": screening_results,
         "included_papers": included,
         "excluded_papers": excluded,
         "uncertain_papers": uncertain,
+        "screening_adjudication_results": adjudication_results,
         "current_stage": (
             "screening_approved"
             if approved
             else "screening_needs_revision"
         ),
-        "execution_logs": add_execution_logs(state.get("execution_logs", []), [
-            f"Human screening approval: {approved}",
-            f"Uncertain papers resolved: "
-            f"{len(state.get('uncertain_papers', [])) - len(uncertain)}",
-            f"Papers remaining uncertain: {len(uncertain)}"
-        ])
+        "execution_logs": logs,
     }
 
 def pdf_preparation_node(state: ReviewState):

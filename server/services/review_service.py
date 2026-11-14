@@ -70,6 +70,15 @@ def get_review(review_id: str):
         "unique_papers": state.get("unique_papers", []),
 
         "screening_results": state.get("screening_results", []),
+        "dual_screening_results": state.get("dual_screening_results", []),
+        "screening_agreement": state.get("screening_agreement", {}),
+        "screening_disagreements": state.get("screening_disagreements", []),
+        "screening_adjudication_results": state.get(
+            "screening_adjudication_results", []
+        ),
+        "screening_technical_failures": state.get(
+            "screening_technical_failures", []
+        ),
         "included_papers": state.get("included_papers", []),
         "excluded_papers": state.get("excluded_papers", []),
         "uncertain_papers": state.get("uncertain_papers", []),

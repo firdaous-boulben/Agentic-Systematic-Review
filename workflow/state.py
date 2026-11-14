@@ -21,6 +21,11 @@ class ReviewState(TypedDict, total=False):
     included_papers: List[Dict[str, Any]]
     excluded_papers: List[Dict[str, Any]]
     uncertain_papers: List[Dict[str, Any]]
+    # Dual screening
+    dual_screening_results: List[Dict[str, Any]]
+    screening_agreement: Dict[str, Any]
+    screening_disagreements: List[Dict[str, Any]]
+    screening_adjudication_results: List[Dict[str, Any]]
 
     # 5. Full-text retrieval and eligibility
     pdf_retrieval_results: List[Dict[str, Any]]

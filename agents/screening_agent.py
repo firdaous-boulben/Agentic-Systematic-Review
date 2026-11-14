@@ -1,13 +1,17 @@
+
 import os
 import json
 import hashlib
 from pathlib import Path
+from collections import Counter
+
 from dotenv import load_dotenv
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
-from config.llm import get_llm
 
+from config.llm import get_llm
 from server.utils.logging import add_execution_logs
+
 
 load_dotenv()
 
@@ -15,13 +19,17 @@ llm = get_llm()
 parser = JsonOutputParser()
 
 BATCH_SIZE = 5
-
 CACHE_PATH = Path("data/processed/screening_cache.json")
+PROMPT_VERSION = "dual-review-v2"
 
+VALID_DECISIONS = {"Include", "Exclude", "Uncertain"}
+
+
+# ---------------------------------------------------------
+# Cache
+# ---------------------------------------------------------
 
 def load_screening_cache():
-    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-
     if not CACHE_PATH.exists():
         return {}
 
@@ -36,102 +44,50 @@ def save_screening_cache(cache):
     CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     with open(CACHE_PATH, "w", encoding="utf-8") as file:
-        json.dump(cache, file, indent=4, ensure_ascii=False)
+        json.dump(cache, file, indent=2, ensure_ascii=False)
 
 
-def get_cache_key(paper, state):
+def get_cache_key(paper, state, reviewer_id):
+    """
+    Generates a reviewer-specific cache key.
+
+    Reviewer A and Reviewer B must never reuse each other's
+    assessments. Prompt versioning also prevents reuse of
+    assessments generated with previous prompts.
+    """
+
     data = {
+        "reviewer": reviewer_id,
+        "prompt_version": PROMPT_VERSION,
         "paper_id": get_paper_id(paper, 0),
-        "title": paper.get("title"),
-        "abstract": paper.get("abstract"),
-        "topic": state.get("topic"),
-        "inclusion_criteria": state.get("inclusion_criteria"),
-        "exclusion_criteria": state.get("exclusion_criteria"),
-        "model": os.getenv("GROQ_MODEL")
+        "title": paper.get("title", ""),
+        "abstract": paper.get("abstract", ""),
+        "topic": state.get("topic", ""),
+        "research_question": state.get("research_question", ""),
+        "inclusion_criteria": state.get("inclusion_criteria", []),
+        "exclusion_criteria": state.get("exclusion_criteria", []),
+        "publication_year_range": (
+            state.get("protocol", {}).get("publication_year_range")
+            if isinstance(state.get("protocol"), dict)
+            else None
+        ),
+        "model": os.getenv("GROQ_MODEL", ""),
     }
 
-    content = json.dumps(data, sort_keys=True, ensure_ascii=False)
-
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
-
-prompt = ChatPromptTemplate.from_messages([
-    (
-        "system",
-        """You are an academic screening assistant for systematic reviews.
-
-Evaluate each paper using ONLY its title, abstract, research topic,
-and eligibility criteria.
-
-Classify each paper as:
-- Include: clearly satisfies the relevant inclusion criteria.
-- Exclude: clearly fails at least one inclusion criterion or meets an exclusion criterion.
-- Uncertain: information is insufficient, including missing or incomplete abstracts.
-
-Rules:
-- Follow the criteria strictly.
-- Do not introduce additional requirements.
-- Do not assume unsupported information.
-- Do not exclude potentially relevant papers solely because their abstracts are unavailable.
-- Do not invent information.
-- Give a short reason for every decision.
-- Evaluate every paper independently.
-- Return exactly one result for each input paper.
-- Preserve each paper's ID exactly.
-
-Return valid JSON in this format:
-{{
-    "results": [
-        {{
-            "paper_id": "the exact paper ID",
-            "decision": "Include, Exclude, or Uncertain",
-            "reason": "Short explanation"
-        }}
-    ]
-}}"""
-    ),
-    (
-        "human",
-        """Research topic: {topic}
-
-Inclusion criteria:
-{inclusion_criteria}
-
-Exclusion criteria:
-{exclusion_criteria}
-
-Papers to evaluate:
-{papers}"""
-    )
-])
-
-screening_chain = prompt | llm | parser
-
-
-def check_publication_year(paper, state):
-    year_range = state.get("protocol", {}).get(
-        "publication_year_range"
+    serialized = json.dumps(
+        data,
+        sort_keys=True,
+        ensure_ascii=False
     )
 
-    if not year_range:
-        raise ValueError("Publication year range is missing from the protocol.")
+    return hashlib.sha256(
+        serialized.encode("utf-8")
+    ).hexdigest()
 
-    try:
-        start_year, end_year = map(int, year_range.split("-"))
-    except (ValueError, AttributeError):
-        return None
 
-    year = paper.get("year")
-
-    if year is None:
-        return None
-
-    try:
-        year = int(year)
-    except (ValueError, TypeError):
-        return None
-
-    return start_year <= year <= end_year
-
+# ---------------------------------------------------------
+# Paper utilities
+# ---------------------------------------------------------
 
 def get_paper_id(paper, index):
     return (
@@ -142,230 +98,736 @@ def get_paper_id(paper, index):
     )
 
 
-def screen_batch(batch, state, start_index):
-    papers_to_evaluate = []
-    results_by_id = {}
-    cache = load_screening_cache()
-    cache_keys = {}
+def check_publication_year(paper, state):
+    """
+    Returns:
+        True  -> year is within the configured range
+        False -> year is outside the configured range
+        None  -> no reliable year/range check is possible
+    """
 
-    for offset, paper in enumerate(batch):
-        index = start_index + offset
+    protocol = state.get("protocol", {})
+
+    if not isinstance(protocol, dict):
+        return None
+
+    year_range = protocol.get("publication_year_range")
+
+    if not year_range:
+        return None
+
+    year = paper.get("year")
+
+    try:
+        year = int(year)
+    except (TypeError, ValueError):
+        return None
+
+    try:
+        if isinstance(year_range, dict):
+            start = year_range.get("start")
+            end = year_range.get("end")
+
+        elif isinstance(year_range, (list, tuple)) and len(year_range) == 2:
+            start, end = year_range
+
+        else:
+            return None
+
+        start = int(start) if start is not None else None
+        end = int(end) if end is not None else None
+
+        if start is not None and year < start:
+            return False
+
+        if end is not None and year > end:
+            return False
+
+        return True
+
+    except (TypeError, ValueError):
+        return None
+
+
+# ---------------------------------------------------------
+# Reviewer A: Strict eligibility assessment
+# ---------------------------------------------------------
+
+reviewer_a_prompt = ChatPromptTemplate.from_messages([
+    (
+        "system",
+        """
+You are Reviewer A, conducting independent title and abstract
+screening for a systematic literature review.
+
+YOUR APPROACH: STRICT ELIGIBILITY ASSESSMENT.
+
+For every paper:
+
+- Examine each inclusion criterion explicitly.
+- Identify any clearly violated exclusion criterion.
+- Require evidence in the title or abstract before considering
+  a criterion satisfied.
+- Do not infer empirical evaluation, methodology, or outcomes
+  that are not reported.
+- If a required criterion cannot be verified, use Uncertain
+  rather than assuming it is satisfied.
+
+Decision rules:
+
+- Include: The available evidence supports all required criteria.
+- Exclude: At least one criterion is clearly not met.
+- Uncertain: There is insufficient information to make a
+  reliable decision.
+
+Apply the supplied criteria exactly as written.
+Do not invent information.
+Do not assume another reviewer has assessed the papers.
+
+Return valid JSON only, using this structure:
+
+{{
+  "results": [
+    {{
+      "paper_id": "the supplied paper ID",
+      "decision": "Include, Exclude, or Uncertain",
+      "reason": "Evidence-based justification"
+    }}
+  ]
+}}
+"""
+    ),
+    (
+        "human",
+        """
+Research topic:
+{topic}
+
+Research question:
+{research_question}
+
+Inclusion criteria:
+{inclusion_criteria}
+
+Exclusion criteria:
+{exclusion_criteria}
+
+Papers to assess:
+{papers_json}
+
+Assess every paper independently.
+Return exactly one result for each supplied paper.
+"""
+    )
+])
+
+
+# ---------------------------------------------------------
+# Reviewer B: Research relevance and evidence assessment
+# ---------------------------------------------------------
+
+reviewer_b_prompt = ChatPromptTemplate.from_messages([
+    (
+        "system",
+        """
+You are Reviewer B, an independent academic reviewer conducting
+title and abstract screening for a systematic literature review.
+
+YOUR APPROACH: RESEARCH RELEVANCE AND EVIDENCE ASSESSMENT.
+
+For every paper:
+
+- Evaluate its relevance to the research question.
+- Examine whether the study addresses the intended review scope.
+- Distinguish between evidence that a criterion is not met
+  and information that is simply missing from the abstract.
+- Consider whether methodological or empirical details may
+  require examination of the full text.
+- Do not exclude a paper solely because its abstract is brief
+  or incomplete when eligibility cannot be established.
+
+Decision rules:
+
+- Include: The available evidence supports the eligibility criteria.
+- Exclude: The available evidence clearly establishes that the
+  paper is outside the review scope or violates a criterion.
+- Uncertain: Eligibility cannot be reliably established from
+  the available information.
+
+Apply exactly the same supplied inclusion and exclusion criteria
+as Reviewer A. Do not relax, modify, or ignore the protocol.
+
+Do not invent information.
+Do not assume another reviewer has assessed the papers.
+
+Return valid JSON only, using this structure:
+
+{{
+  "results": [
+    {{
+      "paper_id": "the supplied paper ID",
+      "decision": "Include, Exclude, or Uncertain",
+      "reason": "Evidence-based justification"
+    }}
+  ]
+}}
+"""
+    ),
+    (
+        "human",
+        """
+Research topic:
+{topic}
+
+Research question:
+{research_question}
+
+Inclusion criteria:
+{inclusion_criteria}
+
+Exclusion criteria:
+{exclusion_criteria}
+
+Papers to assess:
+{papers_json}
+
+Assess every paper independently.
+Return exactly one result for each supplied paper.
+"""
+    )
+])
+
+
+# Each reviewer has a separate chain and prompt.
+reviewer_a_chain = reviewer_a_prompt | llm | parser
+reviewer_b_chain = reviewer_b_prompt | llm | parser
+
+
+# ---------------------------------------------------------
+# One reviewer assessment
+# ---------------------------------------------------------
+
+def assess_batch(batch, state, reviewer_id, cache):
+    """
+    Runs one reviewer's assessment for a batch.
+
+    Returns:
+        paper_id -> decision, reason and assessment status
+    """
+
+    results = {}
+    uncached_papers = []
+
+    for paper, index in batch:
         paper_id = get_paper_id(paper, index)
-
-        year_check = check_publication_year(paper, state)
-
-        if year_check is False:
-            results_by_id[paper_id] = {
-                **paper,
-                "screening_decision": "Exclude",
-                "screening_status": "completed",
-                "screening_reason": (
-                    f"Publication year ({paper.get('year')}) "
-                    "is outside the approved range."
-                )
-            }
-            continue
-
-        if not paper.get("abstract"):
-            results_by_id[paper_id] = {
-                **paper,
-                "screening_decision": "Uncertain",
-                "screening_status": "completed",
-                "screening_reason": (
-                    "Abstract unavailable; manual review required."
-                )
-            }
-            continue
-
-        cache_key = get_cache_key(paper, state)
-        cache_keys[paper_id] = cache_key
+        cache_key = get_cache_key(paper, state, reviewer_id)
 
         cached_result = cache.get(cache_key)
 
-        if cached_result:
-            print(f"[Screening Cache] Reusing: {paper.get('title')}")
-
-            results_by_id[paper_id] = {
-                **paper,
-                "screening_decision": cached_result["decision"],
-                "screening_status": "completed",
-                "screening_reason": cached_result["reason"]
+        if (
+            isinstance(cached_result, dict)
+            and cached_result.get("decision") in VALID_DECISIONS
+        ):
+            results[paper_id] = {
+                "decision": cached_result["decision"],
+                "reason": cached_result.get("reason", ""),
+                "status": "completed",
+                "cached": True,
             }
+
         else:
-            papers_to_evaluate.append({
-                "paper_id": paper_id,
-                "title": paper.get("title") or "Unavailable",
-                "abstract": paper.get("abstract", "")[:3000]
-            })
-
-    if papers_to_evaluate:
-        print(
-            f"[Screening Agent] Sending "
-            f"{len(papers_to_evaluate)} papers to the LLM..."
-        )
-
-        result = screening_chain.invoke({
-            "topic": state["topic"],
-            "inclusion_criteria": "\n".join(
-                state["inclusion_criteria"]
-            ),
-            "exclusion_criteria": "\n".join(
-                state["exclusion_criteria"]
-            ),
-            "papers": str(papers_to_evaluate)
-        })
-
-        returned_results = {
-            item.get("paper_id"): item
-            for item in result.get("results", [])
-            if isinstance(item, dict)
-        }
-
-        for paper_data in papers_to_evaluate:
-            paper_id = paper_data["paper_id"]
-
-            original_paper = next(
-                p for offset, p in enumerate(batch)
-                if get_paper_id(p, start_index + offset) == paper_id
+            uncached_papers.append(
+                (paper, index, paper_id, cache_key)
             )
 
-            item = returned_results.get(paper_id)
+    if not uncached_papers:
+        return results
+
+    papers_payload = []
+
+    for paper, _, paper_id, _ in uncached_papers:
+        papers_payload.append({
+            "paper_id": paper_id,
+            "title": paper.get("title", ""),
+            "abstract": paper.get("abstract", ""),
+            "year": paper.get("year"),
+            "authors": paper.get("authors", []),
+            "journal": paper.get("journal", ""),
+            "source": paper.get("source", ""),
+        })
+
+    try:
+        if reviewer_id == "reviewer_a":
+            chain = reviewer_a_chain
+        elif reviewer_id == "reviewer_b":
+            chain = reviewer_b_chain
+        else:
+            raise ValueError(
+                f"Unknown reviewer identity: {reviewer_id}"
+            )
+
+        response = chain.invoke({
+            "topic": state.get("topic", ""),
+            "research_question": state.get("research_question", ""),
+            "inclusion_criteria": json.dumps(
+                state.get("inclusion_criteria", []),
+                ensure_ascii=False
+            ),
+            "exclusion_criteria": json.dumps(
+                state.get("exclusion_criteria", []),
+                ensure_ascii=False
+            ),
+            "papers_json": json.dumps(
+                papers_payload,
+                ensure_ascii=False
+            ),
+        })
+
+        returned_results = response.get("results", [])
+
+        if not isinstance(returned_results, list):
+            raise ValueError(
+                "The screening response has no valid results list."
+            )
+
+        returned_by_id = {
+            str(item.get("paper_id")): item
+            for item in returned_results
+            if (
+                isinstance(item, dict)
+                and item.get("paper_id") is not None
+            )
+        }
+
+        for paper, _, paper_id, cache_key in uncached_papers:
+            item = returned_by_id.get(str(paper_id))
 
             if not item:
-                results_by_id[paper_id] = {
-                    **original_paper,
-                    "screening_decision": "Uncertain",
-                    "screening_status": "technical_error",
-                    "screening_reason": (
-                        "No valid screening result returned; "
-                        "manual review required."
-                    )
+                results[paper_id] = {
+                    "decision": "Uncertain",
+                    "reason": (
+                        "The reviewer did not return a result "
+                        "for this paper."
+                    ),
+                    "status": "technical_error",
+                    "cached": False,
                 }
                 continue
 
-            decision = str(item.get("decision", "")).capitalize()
+            decision = str(
+                item.get("decision", "")
+            ).strip().capitalize()
 
-            if decision not in ["Include", "Exclude", "Uncertain"]:
-                results_by_id[paper_id] = {
-                    **original_paper,
-                    "screening_decision": "Uncertain",
-                    "screening_status": "technical_error",
-                    "screening_reason": "Invalid LLM decision; manual review required."
+            reason = str(
+                item.get("reason", "")
+            ).strip()
+
+            if decision not in VALID_DECISIONS:
+                results[paper_id] = {
+                    "decision": "Uncertain",
+                    "reason": (
+                        "The reviewer returned an invalid "
+                        "screening decision."
+                    ),
+                    "status": "technical_error",
+                    "cached": False,
                 }
                 continue
 
-            reason = item.get("reason", "No explanation provided.")
+            if not reason:
+                reason = (
+                    "No justification was provided by the reviewer."
+                )
 
-            results_by_id[paper_id] = {
-                **original_paper,
-                "screening_decision": decision,
-                "screening_status": "completed",
-                "screening_reason": reason
+            reviewer_result = {
+                "decision": decision,
+                "reason": reason,
+                "status": "completed",
+                "cached": False,
             }
 
-            # Cache only valid LLM decisions.
-            cache[cache_keys[paper_id]] = {
+            results[paper_id] = reviewer_result
+
+            cache[cache_key] = {
                 "decision": decision,
-                "reason": reason
+                "reason": reason,
             }
 
         save_screening_cache(cache)
 
-    return [
-        results_by_id.get(
-            get_paper_id(paper, start_index + offset),
-            {
-                **paper,
-                "screening_decision": "Uncertain",
-                "screening_status": "completed",
-                "screening_reason": "Screening result missing; manual review required."
+    except Exception as error:
+        error_message = str(error)
+
+        for _, _, paper_id, _ in uncached_papers:
+            results[paper_id] = {
+                "decision": "Uncertain",
+                "reason": (
+                    f"Reviewer assessment failed: {error_message}"
+                ),
+                "status": "technical_error",
+                "cached": False,
             }
-        )
-        for offset, paper in enumerate(batch)
+
+    return results
+
+
+# ---------------------------------------------------------
+# Agreement calculation
+# ---------------------------------------------------------
+
+def calculate_screening_agreement(dual_results):
+    """
+    Calculates observed agreement and Cohen's kappa.
+
+    Includes every paper successfully assessed by both reviewers,
+    including disagreements requiring human adjudication.
+
+    Excludes papers with technical errors or without two
+    successful assessments.
+    """
+
+    valid_pairs = [
+        item
+        for item in dual_results
+        if item.get("dual_screening_status") in [
+            "assessed",
+            "needs_adjudication"
+        ]
     ]
 
+    total = len(valid_pairs)
+
+    if total == 0:
+        return {
+            "assessed_pairs": 0,
+            "agreements": 0,
+            "disagreements": 0,
+            "agreement_percentage": None,
+            "cohens_kappa": None,
+            "note": (
+                "No papers received two valid reviewer assessments."
+            ),
+        }
+
+    reviewer_a = [
+        item["reviewer_assessments"]["reviewer_a"]["decision"]
+        for item in valid_pairs
+    ]
+
+    reviewer_b = [
+        item["reviewer_assessments"]["reviewer_b"]["decision"]
+        for item in valid_pairs
+    ]
+
+    agreements = sum(
+        a == b
+        for a, b in zip(reviewer_a, reviewer_b)
+    )
+
+    disagreements = total - agreements
+
+    observed_agreement = agreements / total
+
+    categories = ["Include", "Exclude", "Uncertain"]
+
+    count_a = Counter(reviewer_a)
+    count_b = Counter(reviewer_b)
+
+    expected_agreement = sum(
+        (count_a[category] / total)
+        * (count_b[category] / total)
+        for category in categories
+    )
+
+    if expected_agreement == 1:
+        kappa = None
+        note = (
+            "Cohen's kappa is undefined because the expected "
+            "agreement is 1."
+        )
+
+    else:
+        kappa = (
+            observed_agreement - expected_agreement
+        ) / (1 - expected_agreement)
+
+        note = None
+
+    return {
+        "assessed_pairs": total,
+        "agreements": agreements,
+        "disagreements": disagreements,
+        "agreement_percentage": round(
+            observed_agreement * 100, 2
+        ),
+        "cohens_kappa": (
+            round(kappa, 4)
+            if kappa is not None
+            else None
+        ),
+        "note": note,
+    }
+
+
+# ---------------------------------------------------------
+# Final decision from two reviewers
+# ---------------------------------------------------------
+
+def combine_reviewer_assessments(
+    paper,
+    paper_id,
+    reviewer_a,
+    reviewer_b
+):
+    assessments = {
+        "reviewer_a": reviewer_a,
+        "reviewer_b": reviewer_b,
+    }
+
+    both_completed = (
+        reviewer_a.get("status") == "completed"
+        and reviewer_b.get("status") == "completed"
+    )
+
+    result = {
+        **paper,
+        "screening_paper_id": paper_id,
+        "reviewer_assessments": assessments,
+    }
+
+    if not both_completed:
+        result.update({
+            "screening_decision": "Uncertain",
+            "screening_reason": (
+                "At least one reviewer assessment failed. "
+                "Manual assessment is required."
+            ),
+            "dual_screening_status": "technical_error",
+        })
+
+        return result
+
+    decision_a = reviewer_a["decision"]
+    decision_b = reviewer_b["decision"]
+
+    if decision_a == decision_b:
+        result.update({
+            "screening_decision": decision_a,
+            "screening_reason": (
+                f"Both reviewers agreed: {decision_a}. "
+                f"Reviewer A: {reviewer_a['reason']} "
+                f"Reviewer B: {reviewer_b['reason']}"
+            ),
+            "dual_screening_status": "assessed",
+        })
+
+        if decision_a == "Uncertain":
+            result["screening_status"] = "needs_human_review"
+
+        return result
+
+    result.update({
+        "screening_decision": "Uncertain",
+        "screening_reason": (
+            "The two reviewers disagreed. "
+            "Human adjudication is required."
+        ),
+        "dual_screening_status": "needs_adjudication",
+    })
+
+    return result
+
+
+# ---------------------------------------------------------
+# Main screening agent
+# ---------------------------------------------------------
+
 def run_screening_agent(state, max_papers=None):
-    print("\n[Screening Agent] Starting paper screening...")
+    print("\n[Screening Agent] Starting dual screening...")
 
     papers = state.get("unique_papers", [])
 
     if max_papers is not None:
         papers = papers[:max_papers]
 
-    screening_results = []
+    cache = load_screening_cache()
 
-    for start in range(0, len(papers), BATCH_SIZE):
-        batch = papers[start:start + BATCH_SIZE]
+    reviewer_a_results = {}
+    reviewer_b_results = {}
+
+    prepared_papers = []
+    deterministic_exclusions = []
+    missing_abstracts = []
+
+    # Prepare papers and apply deterministic year exclusions.
+    for index, paper in enumerate(papers):
+        paper_id = get_paper_id(paper, index)
+
+        year_check = check_publication_year(paper, state)
+
+        if year_check is False:
+            deterministic_exclusions.append({
+                **paper,
+                "screening_paper_id": paper_id,
+                "screening_decision": "Exclude",
+                "screening_reason": (
+                    "Publication year is outside the configured "
+                    "publication year range."
+                ),
+                "dual_screening_status": "deterministic_exclusion",
+            })
+
+            continue
+
+        if not paper.get("abstract"):
+            missing_abstracts.append({
+                **paper,
+                "screening_paper_id": paper_id,
+                "screening_decision": "Uncertain",
+                "screening_reason": (
+                    "No abstract is available for reliable title "
+                    "and abstract screening. Manual assessment "
+                    "is required."
+                ),
+                "dual_screening_status": "not_assessed",
+            })
+
+            continue
+
+        prepared_papers.append((paper, index))
+
+    # Run the two reviewers independently.
+    for start in range(0, len(prepared_papers), BATCH_SIZE):
+        batch = prepared_papers[start:start + BATCH_SIZE]
 
         print(
-            f"[Screening Agent] Screening batch "
-            f"{start // BATCH_SIZE + 1}/"
-            f"{(len(papers) + BATCH_SIZE - 1) // BATCH_SIZE}..."
+            f"[Screening Agent] Processing batch "
+            f"{start // BATCH_SIZE + 1}..."
         )
 
-        try:
-            batch_results = screen_batch(batch, state, start)
-        except Exception as error:
-            print(f"[Screening Agent] Batch error: {error}")
+        reviewer_a_batch = assess_batch(
+            batch,
+            state,
+            "reviewer_a",
+            cache
+        )
 
-            batch_results = [
-                {
-                    **paper,
-                    "screening_decision": "Uncertain",
-                    "screening_status": "technical_error",
-                    "screening_reason": (
-                        f"Technical screening failure: {error}"
-                    )
-                }
-                for paper in batch
-            ]
+        reviewer_b_batch = assess_batch(
+            batch,
+            state,
+            "reviewer_b",
+            cache
+        )
 
-        screening_results.extend(batch_results)
+        reviewer_a_results.update(reviewer_a_batch)
+        reviewer_b_results.update(reviewer_b_batch)
 
-    completed = [
-        p for p in screening_results
-        if p.get("screening_status") == "completed"
-    ]
-    
+    # Combine reviewer assessments.
+    dual_screening_results = []
+    screening_results = []
+
+    for paper, index in prepared_papers:
+        paper_id = get_paper_id(paper, index)
+
+        reviewer_a = reviewer_a_results.get(paper_id, {
+            "decision": "Uncertain",
+            "reason": "No result returned by Reviewer A.",
+            "status": "technical_error",
+            "cached": False,
+        })
+
+        reviewer_b = reviewer_b_results.get(paper_id, {
+            "decision": "Uncertain",
+            "reason": "No result returned by Reviewer B.",
+            "status": "technical_error",
+            "cached": False,
+        })
+
+        combined = combine_reviewer_assessments(
+            paper,
+            paper_id,
+            reviewer_a,
+            reviewer_b
+        )
+
+        dual_screening_results.append(combined)
+        screening_results.append(combined)
+
+    # Include deterministic exclusions and missing abstracts.
+    screening_results.extend(deterministic_exclusions)
+    screening_results.extend(missing_abstracts)
+
+    # Calculate final screening groups.
     included = [
-        p for p in screening_results
-        if p["screening_decision"] == "Include"
+        paper for paper in screening_results
+        if paper.get("screening_decision") == "Include"
     ]
 
     excluded = [
-        p for p in screening_results
-        if p["screening_decision"] == "Exclude"
+        paper for paper in screening_results
+        if paper.get("screening_decision") == "Exclude"
     ]
 
     uncertain = [
-        p for p in screening_results
-        if p["screening_decision"] == "Uncertain"
+        paper for paper in screening_results
+        if paper.get("screening_decision") == "Uncertain"
     ]
+
+    disagreements = [
+        paper for paper in uncertain
+        if paper.get("dual_screening_status") == "needs_adjudication"
+    ]
+
+    agreement = calculate_screening_agreement(
+        dual_screening_results
+    )
 
     technical_failures = [
-        p for p in screening_results
-        if p.get("screening_status") == "technical_error"
+        paper for paper in uncertain
+        if paper.get("dual_screening_status") == "technical_error"
     ]
 
-    print("\n[Screening Agent] Screening completed.")
-    print("Included:", len(included))
-    print("Excluded:", len(excluded))
-    print("Uncertain:", len(uncertain))
-    print("Technical failures:", len(technical_failures))
+    print(
+        f"[Screening Agent] Completed: "
+        f"{len(included)} included, "
+        f"{len(excluded)} excluded, "
+        f"{len(uncertain)} uncertain."
+    )
+
+    print(
+        f"[Screening Agent] Agreement: "
+        f"{agreement['agreement_percentage']}%"
+        if agreement["agreement_percentage"] is not None
+        else "[Screening Agent] Agreement could not be calculated."
+    )
+
+    logs = add_execution_logs(
+        state.get("execution_logs", []),
+        (
+            "Screening Agent: Dual screening completed. "
+            f"{len(included)} included, "
+            f"{len(excluded)} excluded, "
+            f"{len(uncertain)} uncertain, "
+            f"{len(disagreements)} disagreements."
+        )
+    )
 
     return {
+        # Existing fields retained for compatibility.
         "screening_results": screening_results,
         "included_papers": included,
         "excluded_papers": excluded,
         "uncertain_papers": uncertain,
+
+        # Dual-screening fields.
+        "dual_screening_results": dual_screening_results,
+        "screening_agreement": agreement,
+        "screening_disagreements": disagreements,
+        "screening_adjudication_results": [],
+
         "current_stage": "screening_completed",
-        "execution_logs": add_execution_logs(
-            state.get("execution_logs", []), 
-            [
-                f"Screened {len(screening_results)} papers in batches of {BATCH_SIZE}.",
-                f"Included: {len(included)}.",
-                f"Excluded: {len(excluded)}.",
-                f"Uncertain: {len(uncertain)}."
-            ]
-        )
+        "execution_logs": logs,
+
+        # Diagnostic information.
+        "screening_technical_failures": technical_failures,
     }
