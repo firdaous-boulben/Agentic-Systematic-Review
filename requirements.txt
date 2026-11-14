@@ -10,3 +10,6 @@ pymupdf
 chromadb
 sentence-transformers
 matplotlib
+langgraph-checkpoint-sqlite
+fastapi
+uvicorn[standard]

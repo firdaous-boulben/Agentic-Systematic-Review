@@ -7,6 +7,8 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from config.llm import get_llm
 
+from server.utils.logging import add_execution_logs
+
 load_dotenv()
 
 llm = get_llm()
@@ -45,7 +47,7 @@ def get_cache_key(paper, state):
         "topic": state.get("topic"),
         "inclusion_criteria": state.get("inclusion_criteria"),
         "exclusion_criteria": state.get("exclusion_criteria"),
-        "model": os.getenv("OPENROUTER_MODEL")
+        "model": os.getenv("GROQ_MODEL")
     }
 
     content = json.dumps(data, sort_keys=True, ensure_ascii=False)
@@ -357,10 +359,13 @@ def run_screening_agent(state, max_papers=None):
         "excluded_papers": excluded,
         "uncertain_papers": uncertain,
         "current_stage": "screening_completed",
-        "execution_logs": state.get("execution_logs", []) + [
-            f"Screened {len(screening_results)} papers in batches of {BATCH_SIZE}.",
-            f"Included: {len(included)}.",
-            f"Excluded: {len(excluded)}.",
-            f"Uncertain: {len(uncertain)}."
-        ]
+        "execution_logs": add_execution_logs(
+            state.get("execution_logs", []), 
+            [
+                f"Screened {len(screening_results)} papers in batches of {BATCH_SIZE}.",
+                f"Included: {len(included)}.",
+                f"Excluded: {len(excluded)}.",
+                f"Uncertain: {len(uncertain)}."
+            ]
+        )
     }

@@ -4,6 +4,8 @@ from langchain_core.output_parsers import JsonOutputParser
 from config.llm import get_llm
 from tools.academic_search import search_openalex
 
+from server.utils.logging import add_execution_logs
+
 load_dotenv()
 
 # Initialize LLM
@@ -18,10 +20,17 @@ prompt = ChatPromptTemplate.from_messages([
         """You are an academic literature search specialist.
 
 Given a research topic and a list of keywords,
-generate 3 to 5 distinct academic search queries.
+generate 3 to 5 distinct academic search queries
+compatible with the OpenAlex API.
 
-Queries should cover different aspects of the topic
-while remaining relevant to the research question.
+Requirements:
+- Use relevant terms and exact phrases in double quotes.
+- You may use uppercase AND and OR operators.
+- Do not use wildcards (* or ?).
+- Do not include publication-date restrictions or database-specific
+  syntax such as PubMed field tags.
+- Keep queries concise and focused.
+- Each query should explore a distinct aspect of the research topic.
 
 Return valid JSON in this format:
 {{
@@ -128,9 +137,9 @@ def run_search_agent(state):
         "retrieved_papers": all_papers,
         "unique_papers": unique_papers,
         "current_stage": "search_completed",
-        "execution_logs": state.get("execution_logs", []) + [
+        "execution_logs": add_execution_logs(state.get("execution_logs", []), [
             f"Generated {len(queries)} academic search queries.",
             f"Retrieved {len(all_papers)} papers.",
             f"Found {len(unique_papers)} unique papers."
-        ]
+        ])
     }

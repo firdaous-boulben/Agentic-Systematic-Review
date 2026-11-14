@@ -1,5 +1,5 @@
-﻿
-import os
+﻿import os
+import re
 import requests
 from dotenv import load_dotenv
 
@@ -25,6 +25,62 @@ def reconstruct_abstract(inverted_index):
     )
 
 
+def prepare_openalex_query(query):
+    """
+    Convert database-specific date syntax into OpenAlex filters
+    and prepare wildcard terms for standard OpenAlex search.
+    """
+
+    start_year = None
+    end_year = None
+
+    # Extract PubMed-style date range: (2015:2026[dp])
+    date_match = re.search(
+        r"\(?\s*(\d{4})\s*:\s*(\d{4})\s*\[dp\]\s*\)?",
+        query,
+        flags=re.IGNORECASE
+    )
+
+    if date_match:
+        start_year = int(date_match.group(1))
+        end_year = int(date_match.group(2))
+
+        # Remove the date expression and its preceding AND
+        query = re.sub(
+            r"\s+AND\s+\(?\s*\d{4}\s*:\s*\d{4}\s*\[dp\]\s*\)?",
+            "",
+            query,
+            flags=re.IGNORECASE
+        )
+
+    # Remove any remaining trailing Boolean operator
+    query = re.sub(
+        r"\s+(AND|OR)\s*$",
+        "",
+        query,
+        flags=re.IGNORECASE
+    ).strip()
+
+    # Remove trailing wildcards for standard stemmed search
+    query = re.sub(
+        r"\b([a-zA-Z]{3,})\*",
+        r"\1",
+        query
+    )
+
+    filters = []
+
+    if start_year and end_year:
+        filters.append(
+            f"from_publication_date:{start_year}-01-01"
+        )
+        filters.append(
+            f"to_publication_date:{end_year}-12-31"
+        )
+
+    return query, ",".join(filters) if filters else None
+
+
 def search_openalex(query, max_results=10):
 
     api_key = os.getenv("OPENALEX_API_KEY")
@@ -32,11 +88,12 @@ def search_openalex(query, max_results=10):
     if not api_key:
         raise ValueError("OPENALEX_API_KEY is missing from .env")
 
+    clean_query, date_filter = prepare_openalex_query(query)
+
     params = {
-        "search": query,
+        "search": clean_query,
         "per_page": max_results,
         "sort": "relevance_score:desc",
-        "api_key": api_key,
         "select": (
             "id,doi,display_name,publication_year,"
             "authorships,abstract_inverted_index,"
@@ -45,15 +102,32 @@ def search_openalex(query, max_results=10):
         )
     }
 
-    print(f"\n[OpenAlex] Searching for: {query}")
+    if date_filter:
+        params["filter"] = date_filter
+
+    headers = {
+        "Authorization": f"Bearer {api_key}"
+    }
+
+    print(f"\n[OpenAlex] Searching for: {clean_query}")
+
+    if date_filter:
+        print(f"[OpenAlex] Date filter: {date_filter}")
 
     response = requests.get(
         OPENALEX_API_URL,
         params=params,
+        headers=headers,
         timeout=30
     )
 
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as error:
+        raise RuntimeError(
+            f"OpenAlex API error: {response.status_code} - "
+            f"{response.text}"
+        ) from error
 
     results = response.json().get("results", [])
 
@@ -82,7 +156,6 @@ def search_openalex(query, max_results=10):
             ),
             "journal": source.get("display_name"),
 
-            # Publication and full-text locations
             "url": location.get("landing_page_url"),
             "landing_page_url": (
                 oa_location.get("landing_page_url")

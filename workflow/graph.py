@@ -1,5 +1,7 @@
+import os
+import sqlite3
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import StateGraph, START, END
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import interrupt
 from workflow.state import ReviewState
 from agents.protocol_agent import generate_protocol
@@ -13,6 +15,7 @@ from agents.full_text_eligibility_agent import run_full_text_eligibility_agent
 from tools.prisma_tracker import calculate_prisma_data
 from tools.prisma_diagram import generate_prisma_diagram
 from tools.report_generator import generate_review_report
+from server.utils.logging import add_execution_logs
 
 def coordinator(state: ReviewState):
     topic = state.get("topic", "Unknown topic")
@@ -20,8 +23,8 @@ def coordinator(state: ReviewState):
 
     return {
         "current_stage": "initialized",
-        "execution_logs": state.get("execution_logs", []) +
-            [f"Review initialized for topic: {topic}"]
+        "execution_logs": add_execution_logs(state.get("execution_logs", []),
+            [f"Review initialized for topic: {topic}"])
     }
 
 
@@ -36,8 +39,8 @@ def protocol_node(state: ReviewState):
         "inclusion_criteria": protocol["inclusion_criteria"],
         "exclusion_criteria": protocol["exclusion_criteria"],
         "current_stage": "protocol_generated",
-        "execution_logs": state.get("execution_logs", []) +
-            ["Review protocol generated successfully."]
+        "execution_logs": add_execution_logs(state.get("execution_logs", []),
+            ["Review protocol generated successfully."])
     }
 
 
@@ -129,12 +132,12 @@ def human_review_node(state: ReviewState):
             if approved
             else "screening_needs_revision"
         ),
-        "execution_logs": state.get("execution_logs", []) + [
+        "execution_logs": add_execution_logs(state.get("execution_logs", []), [
             f"Human screening approval: {approved}",
             f"Uncertain papers resolved: "
             f"{len(state.get('uncertain_papers', [])) - len(uncertain)}",
             f"Papers remaining uncertain: {len(uncertain)}"
-        ]
+        ])
     }
 
 def pdf_preparation_node(state: ReviewState):
@@ -155,6 +158,21 @@ def approval_router(state: ReviewState):
         return "pdf_preparation"
     return END
 
+def extraction_router(state: ReviewState):
+    status = state.get("extraction_status")
+    if status == "completed":
+        return "appraisal"
+
+    if status == "skipped":
+        return "prisma"
+
+    # Do not proceed with incomplete or failed extraction.
+    print(
+        f"[Coordinator] Extraction is {status}. "
+        "Stopping the workflow before quality appraisal."
+    )
+    return END
+
 def appraisal_node(state: ReviewState):
     print("\n[Coordinator] Calling Appraisal Agent...")
     return run_appraisal_agent(state)
@@ -173,9 +191,9 @@ def prisma_node(state: ReviewState):
     print("[PRISMA] Statistics calculated.")
     return {
         "prisma_data": prisma_data,
-        "execution_logs": state.get("execution_logs", []) + [
+        "execution_logs": add_execution_logs(state.get("execution_logs", []), [
             "PRISMA statistics calculated."
-        ]
+        ])
     }
 
 def prisma_diagram_node(state: ReviewState):
@@ -183,9 +201,9 @@ def prisma_diagram_node(state: ReviewState):
     output_path = generate_prisma_diagram(state.get("prisma_data", {}))
     return {
         "prisma_diagram_path": output_path,
-        "execution_logs": state.get("execution_logs", []) + [
+        "execution_logs": add_execution_logs(state.get("execution_logs", []), [
             "PRISMA flow diagram generated successfully."
-        ]
+        ])
     }
 
 def report_node(state: ReviewState):
@@ -194,9 +212,9 @@ def report_node(state: ReviewState):
     return {
         "final_report": report_path,
         "current_stage": "report_generated",
-        "execution_logs": state.get("execution_logs", []) + [
+        "execution_logs": add_execution_logs(state.get("execution_logs", []), [
             "Systematic review report generated successfully."
-        ]
+        ])
     }
 
 builder = StateGraph(ReviewState)
@@ -221,22 +239,26 @@ builder.add_edge(START, "coordinator")
 builder.add_edge("coordinator", "protocol")
 builder.add_edge("protocol", "search")
 builder.add_edge("search", "screening")
-# Human review of title/abstract screening
 builder.add_edge("screening", "human_review")
-# Continue only if the screening is approved
 builder.add_conditional_edges("human_review", approval_router, {"pdf_preparation": "pdf_preparation", END: END})
-# Full-text retrieval and eligibility
 builder.add_edge("pdf_preparation", "full_text_eligibility")
 builder.add_edge("full_text_eligibility", "extract")
-# Information extraction and analysis
-builder.add_edge("extract", "appraisal")
+builder.add_conditional_edges("extract", extraction_router, {"appraisal": "appraisal", "prisma": "prisma", END: END})
 builder.add_edge("appraisal", "synthesis")
 builder.add_edge("synthesis", "critic")
-# Final PRISMA statistics and report
 builder.add_edge("critic", "prisma")
 builder.add_edge("prisma", "prisma_diagram")
 builder.add_edge("prisma_diagram", "report")
 builder.add_edge("report", END)
 
-memory = MemorySaver()
-review_graph = builder.compile(checkpointer=memory)
+os.makedirs("data", exist_ok=True)
+
+connection = sqlite3.connect(
+    "data/review_checkpoints.sqlite",
+    check_same_thread=False
+)
+
+checkpointer = SqliteSaver(connection)
+checkpointer.setup()
+
+review_graph = builder.compile(checkpointer=checkpointer)

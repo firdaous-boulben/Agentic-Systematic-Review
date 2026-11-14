@@ -1,8 +1,10 @@
 import os
+import time
 from dotenv import load_dotenv
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.exceptions import OutputParserException
 
 from config.llm import get_llm
 from rag.retriever import PaperRetriever
@@ -10,9 +12,12 @@ from tools.pdf_retrieval import create_filename, retrieve_pdfs
 from tools.pdf_extractor import process_pdf
 from rag.indexer import build_index
 
+from server.utils.logging import add_execution_logs
+from workflow.state import ReviewState
+
 load_dotenv()
 
-llm = get_llm()
+llm = get_llm(max_tokens=4000, reasoning_effort="low")
 
 parser = JsonOutputParser()
 
@@ -227,15 +232,52 @@ def extract_paper_information(paper, retriever=None, protocol=None):
         "extraction_dimensions", []
     )
 
-    result = extraction_chain.invoke({
-        "title": paper.get("title") or "Unavailable",
-        "abstract": (paper.get("abstract") or "Unavailable")[:5000],
-        "extraction_dimensions": "\n".join(
-            f"- {dimension}" for dimension in dimensions
-        ) or "No topic-specific dimensions provided.",
+    inputs = {  
+        "title": paper.get("title", ""),
+        "abstract": paper.get("abstract", "")[:5000],
+        "extraction_dimensions": dimensions,
         "full_text_evidence": full_text_evidence,
         "extraction_source": extraction_source
-    })
+    }
+
+    # Call the LLM without the JSON parser
+    raw_chain = prompt | llm
+    response = raw_chain.invoke(inputs)
+
+    print("\n[Extraction Agent] Raw response content:")
+    print(repr(response.content))
+
+    print("\n[Extraction Agent] Response metadata:")
+    print(response.response_metadata)
+
+    print("\n[Extraction Agent] Usage metadata:")
+    print(response.usage_metadata)
+
+    # Parse
+    content = response.content
+
+    if isinstance(content, str):
+        raw_text = content
+
+    elif isinstance(content, list):
+        raw_text = "\n".join(
+            block.get("text", "")
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+
+    else:
+        raise ValueError(
+            f"Unexpected LLM response type: {type(content)}"
+        )
+
+    print("\n[Extraction Agent] Extracted text:")
+    print(raw_text)
+
+    if not raw_text.strip():
+        raise ValueError("The LLM returned no text content.")
+
+    result = parser.parse(raw_text)
 
     return {
         **paper,
@@ -259,9 +301,9 @@ def prepare_full_text_documents(state):
             "pdf_retrieval_results": [],
             "full_text_available_papers": [],
             "current_stage": "pdf_retrieval_skipped",
-            "execution_logs": state.get("execution_logs", []) + [
+            "execution_logs": add_execution_logs(state.get("execution_logs", []),
                 "PDF preparation skipped: no papers passed title/abstract screening."
-            ]
+            )
         }
 
     # 1. Retrieve PDFs
@@ -316,90 +358,216 @@ def prepare_full_text_documents(state):
         "pdf_retrieval_results": prepared_papers,
         "full_text_available_papers": full_text_available,
         "current_stage": "full_text_prepared",
-        "execution_logs": state.get("execution_logs", []) + [
-            f"PDFs sought for retrieval: {len(papers)}.",
-            f"PDFs retrieved: {retrieved_count}.",
-            f"PDFs successfully processed: {len(full_text_available)}.",
-            f"RAG index updated with {indexed_chunks} new chunks."
-        ]
+        "execution_logs": add_execution_logs(
+            state.get("execution_logs", []),
+            [
+                f"PDFs sought for retrieval: {len(papers)}.",
+                f"PDFs retrieved: {retrieved_count}.",
+                f"PDFs successfully processed: {len(full_text_available)}.",
+                f"RAG index updated with {indexed_chunks} new chunks."
+            ]
+        )
     }
 
 
-def run_extraction_agent(state):
-    """Extract information only from papers eligible after full-text assessment."""
+def get_paper_key(paper):
+    """Return a stable identifier for a paper."""
+    return (
+        paper.get("openalex_id")
+        or paper.get("doi")
+        or paper.get("id")
+        or paper.get("paper_id")
+        or (paper.get("title") or paper.get("paper_title", "")).strip().lower()
+    )
+
+
+def extract_with_retry(paper, retriever, protocol, max_attempts=4):
+    """Retry temporary LLM/API errors without repeating successful studies."""
+
+    for attempt in range(max_attempts):
+        try:
+            return extract_paper_information(
+                paper,
+                retriever,
+                protocol=protocol
+            )
+
+        except Exception as error:
+            message = str(error).lower()
+
+            retryable = any(term in message for term in [
+                "429",
+                "rate limit",
+                "too many requests",
+                "timeout",
+                "temporarily unavailable",
+                "502",
+                "503",
+                "504"
+            ])
+
+            if not retryable or attempt == max_attempts - 1:
+                raise
+
+            delay = 15 * (2 ** attempt)
+
+            print(
+                f"[Extraction Agent] Temporary API error. "
+                f"Retrying in {delay} seconds "
+                f"(attempt {attempt + 2}/{max_attempts})."
+            )
+
+            time.sleep(delay)
+
+
+def run_extraction_agent(state: ReviewState):
+    """Extract eligible papers while preserving previous successful results."""
 
     print("\n[Extraction Agent] Starting information extraction...")
 
     papers = state.get("full_text_eligible_papers", [])
     protocol = state.get("protocol", {})
-    extracted_data = []
 
+    # Preserve previous successful extractions.
+    extracted_data = list(state.get("extracted_data", []))
+
+    extracted_keys = {
+        get_paper_key(paper)
+        for paper in extracted_data
+    }
+
+    # No papers passed full-text eligibility.
     if not papers:
-        print("[Extraction Agent] No papers passed full-text eligibility.")
-
         return {
-            "extracted_data": [],
+            "extracted_data": extracted_data,
+            "extraction_failures": [],
+            "extraction_status": "skipped",
             "current_stage": "extraction_skipped",
-            "execution_logs": state.get("execution_logs", []) + [
+            "execution_logs": add_execution_logs(
+                state.get("execution_logs", []),
                 "Extraction skipped: no papers passed full-text eligibility."
-            ]
+            )
         }
 
-    # Initialize the RAG retriever once.
+    # Use unique identifiers from the eligible papers.
+    eligible_keys = {
+        get_paper_key(paper)
+        for paper in papers
+    }
+
+    # Count only successful extractions belonging to this eligible set.
+    successful_keys = eligible_keys.intersection(extracted_keys)
+
+    # Process only papers that have not already been extracted.
+    pending_papers = [
+        paper for paper in papers
+        if get_paper_key(paper) not in successful_keys
+    ]
+
+    # Initialize the RAG retriever.
     retriever = None
 
     try:
         if os.path.isdir("data/chroma_db"):
             retriever = PaperRetriever()
             print("[Extraction Agent] RAG retriever initialized.")
+        else:
+            raise FileNotFoundError("Chroma database not found.")
 
     except Exception as error:
         print("[Extraction Agent] RAG initialization failed:", error)
 
-    full_text_count = 0
-    abstract_count = 0
+    print("Previously extracted eligible papers:", len(successful_keys))
+    print("Remaining to process:", len(pending_papers))
 
-    for index, paper in enumerate(papers, 1):
+    # Failures are rebuilt for this attempt.
+    # Papers that succeed on retry will no longer retain stale failures.
+    extraction_failures = []
+
+    for index, paper in enumerate(pending_papers, 1):
+
+        title = paper.get("title", "Unknown title")
+        paper_key = get_paper_key(paper)
 
         print(
             f"\n[Extraction Agent] Processing paper "
-            f"{index}/{len(papers)}..."
+            f"{index}/{len(pending_papers)}: {title}"
         )
 
         try:
-            extracted = extract_paper_information(
+            if retriever is None:
+                raise RuntimeError("RAG retriever is unavailable.")
+
+            extracted = extract_with_retry(
                 paper,
                 retriever,
-                protocol=protocol
+                protocol
             )
 
             extracted_data.append(extracted)
+            successful_keys.add(paper_key)
 
-            if extracted["extraction_source"] == "full_text_rag":
-                full_text_count += 1
-            else:
-                abstract_count += 1
-
-            print("[Extraction Agent] Source:", extracted["extraction_source"])
-            print("[Extraction Agent] Evidence entries:", extracted["evidence_count"])
-
-        except Exception as error:
+            print("[Extraction Agent] Extraction successful.")
             print(
-                f"[Extraction Agent] Error processing "
-                f"{paper.get('title')}: {error}"
+                "[Extraction Agent] Evidence entries:",
+                extracted.get("evidence_count", 0)
             )
 
-    print("\n[Extraction Agent] Extraction completed.")
-    print("Successfully extracted:", len(extracted_data))
-    print("Full-text extraction:", full_text_count)
-    print("Abstract-based extraction:", abstract_count)
+        except Exception as error:
+
+            extraction_failures.append({
+                "paper_title": title,
+                "paper_id": paper_key,
+                "error": str(error),
+                "status": "failed"
+            })
+
+            print("[Extraction Agent] Extraction failed:", error)
+
+    # Calculate progress against eligible papers only.
+    successful_count = len(successful_keys)
+    remaining_count = len(eligible_keys) - successful_count
+    failed_count = len(extraction_failures)
+
+    full_text_count = sum(
+        1 for paper in extracted_data
+        if get_paper_key(paper) in eligible_keys
+        and paper.get("extraction_source") == "full_text_rag"
+    )
+
+    if remaining_count == 0:
+        extraction_status = "completed"
+        current_stage = "extraction_completed"
+
+    elif successful_count > 0:
+        extraction_status = "partially_completed"
+        current_stage = "extraction_partially_completed"
+
+    else:
+        extraction_status = "failed"
+        current_stage = "extraction_failed"
+
+    print("\n[Extraction Agent] Extraction summary.")
+    print("Total eligible papers:", len(eligible_keys))
+    print("Successfully extracted:", successful_count)
+    print("Failed:", failed_count)
+    print("Remaining:", remaining_count)
+
+    logs = [
+        f"Extraction status: {extraction_status}.",
+        f"Successfully extracted: {successful_count}/{len(eligible_keys)}.",
+        f"Failed extractions: {failed_count}.",
+        f"Remaining studies: {remaining_count}.",
+        f"Full-text extractions: {full_text_count}."
+    ]
 
     return {
         "extracted_data": extracted_data,
-        "current_stage": "extraction_completed",
-        "execution_logs": state.get("execution_logs", []) + [
-            f"Extracted information from {len(extracted_data)} eligible papers.",
-            f"Full-text extraction: {full_text_count}.",
-            f"Abstract-based extraction: {abstract_count}."
-        ]
+        "extraction_failures": extraction_failures,
+        "extraction_status": extraction_status,
+        "current_stage": current_stage,
+        "execution_logs": add_execution_logs(
+            state.get("execution_logs", []),
+            logs
+        )
     }

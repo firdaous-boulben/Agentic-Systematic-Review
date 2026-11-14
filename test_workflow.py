@@ -1,98 +1,111 @@
+
 from langgraph.types import Command
 from workflow.graph import review_graph
 
-topic = "Artificial Intelligence for Cybersecurity Threat Detection"
 
-initial_state = {
-    "topic": topic,
-    "execution_logs": []
-}
+def print_review_status(state):
+    print("\n========== REVIEW STATUS ==========")
+    print("Topic:", state.get("topic", "Unknown"))
+    print("Current stage:", state.get("current_stage", "Unknown"))
+    print("Retrieved papers:", len(state.get("unique_papers", [])))
+    print("Screening results:", len(state.get("screening_results", [])))
+    print("Full-text eligible:", len(state.get("full_text_eligible_papers", [])))
+    print("Extracted papers:", len(state.get("extracted_data", [])))
+
+    if state.get("final_report"):
+        print("Final report:", state["final_report"])
+
+    print("===================================\n")
+
+
+# Select the review to open
+thread_id = input("Review ID [review_001]: ").strip() or "review_001"
 
 config = {
     "configurable": {
-        "thread_id": "review_001"
+        "thread_id": thread_id
     }
 }
 
-# Start workflow
-result = review_graph.invoke(initial_state, config=config)
+# Check whether this review already exists
+snapshot = review_graph.get_state(config)
 
-# Display screening results
-print("\n========== HUMAN REVIEW ==========")
+if not snapshot.values:
+    # Start a new review
+    print("\nStarting a new review.")
 
-for category in [
-    "included_papers",
-    "excluded_papers",
-    "uncertain_papers"
-]:
-    print(f"\n{category.upper().replace('_', ' ')}:")
+    topic = input("Enter research topic: ").strip()
 
-    for paper in result[category]:
-        print("-", paper["title"])
-        print("  Reason:", paper["screening_reason"])
+    if not topic:
+        print("Topic cannot be empty.")
+        raise SystemExit
 
-# Request human approval
-approval = input(
-    "\nDo you approve these screening results? (yes/no): "
-).strip().lower()
+    initial_state = {
+        "topic": topic,
+        "execution_logs": []
+    }
 
-# Resume workflow
-result = review_graph.invoke(
-    Command(resume=approval),
-    config=config
-)
-
-if result.get("human_approval"):
-    print("\n========== EXTRACTION RESULTS ==========")
-
-    for paper in result.get("extracted_data", []):
-        print("\nTitle:", paper["title"])
-
-        for field, value in paper["extracted_information"].items():
-            print(f"{field.replace('_', ' ').title()}: {value}")
+    result = review_graph.invoke(initial_state, config=config)
 
 else:
-    print("\nExtraction skipped: screening was not approved.")
+    # Existing review
+    print("\nExisting review found.")
+    print_review_status(snapshot.values)
 
-if result.get("human_approval"):
-    print("\n========== QUALITY APPRAISAL ==========")
+    if not snapshot.next:
+        print("This review has already completed.")
+        print("Use a different Review ID to start another review.")
+        raise SystemExit
 
-    for paper in result.get("quality_results", []):
-        print("\nTitle:", paper["title"])
+    # Resume a pending human approval
+    if "human_review" in snapshot.next:
+        print("This review is waiting for human approval.")
 
-        appraisal = paper["quality_appraisal"]
+        approval = input(
+            "Approve screening? (yes/no): "
+        ).strip().lower()
 
-        print("Study type:", appraisal["study_type"])
+        result = review_graph.invoke(
+            Command(resume=approval),
+            config=config
+        )
 
-        for dimension, assessment in appraisal["assessments"].items():
-            print(f"{dimension}: {assessment['rating']}")
-            print("Reason:", assessment["reason"])
+    else:
+        # Resume from the last saved checkpoint
+        print("Resuming interrupted workflow...")
+        
+        result = review_graph.invoke(
+            None,
+            config=config
+        )
 
-        print("\nFull-text verification:")
-        for item in appraisal["full_text_verification"]:
-            print("-", item)
 
-print("\n========== RESEARCH SYNTHESIS ==========")
-print(result.get("synthesis", "No synthesis available."))
+# Check whether human approval is now required
+snapshot = review_graph.get_state(config)
 
-print("\n========== CRITIC FEEDBACK ==========")
-print(result.get("critic_feedback", "No feedback available."))
-print("\nValidation status:", result.get("validation_status"))
+if "human_review" in snapshot.next:
+    state = snapshot.values
 
-print("\n========== WORKFLOW STATUS ==========")
-print("Human approval:", result["human_approval"])
-print("Current stage:", result["current_stage"])
+    print("\nScreening summary:")
+    print("Included:", len(state.get("included_papers", [])))
+    print("Excluded:", len(state.get("excluded_papers", [])))
+    print("Uncertain:", len(state.get("uncertain_papers", [])))
 
-print("\n========== PRISMA STATISTICS ==========")
-for key, value in result.get("prisma_data", {}).items():
-    print(f"{key}: {value}")
+    approval = input(
+        "\nApprove screening? (yes/no): "
+    ).strip().lower()
 
-print("\n========== PRISMA DIAGRAM ==========")
-print(result.get("prisma_diagram_path"))
+    result = review_graph.invoke(
+        Command(resume=approval),
+        config=config
+    )
 
-print("\n========== FINAL REPORT ==========")
-print(result.get("final_report", "No report generated."))
 
-print("\nExecution logs:")
-for log in result["execution_logs"]:
-    print("-", log)
+# Display latest saved state
+snapshot = review_graph.get_state(config)
+print_review_status(snapshot.values)
+
+if snapshot.next:
+    print("Workflow still has pending steps:", snapshot.next)
+else:
+    print("Workflow execution completed.")

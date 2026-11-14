@@ -1,12 +1,7 @@
-
 import os
 from datetime import datetime
 
-
-def generate_review_report(
-    state,
-    output_path="outputs/systematic_review_report.md"
-):
+def generate_review_report(state, output_path="outputs/systematic_review_report.md"):
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
     topic = state.get("topic", "Not specified")
@@ -14,6 +9,11 @@ def generate_review_report(
     prisma = state.get("prisma_data", {})
     extracted = state.get("extracted_data", [])
     quality = state.get("quality_results", [])
+
+    extraction_failures = state.get("extraction_failures", [])
+    extraction_status = state.get("extraction_status", "not_recorded")
+
+    eligible_papers = state.get("full_text_eligible_papers", [])
 
     lines = []
 
@@ -40,18 +40,33 @@ def generate_review_report(
         f"\n**Critic validation status:** {validation_status}"
     )
 
-    if validation_status != "APPROVED":
+    if extraction_status in ["failed", "skipped"]:
         lines.append(
-            "\n> **Review status:** This report requires further validation. "
-            "The automated critic did not approve the current synthesis."
-        )
-    else:
-        lines.append(
-            "\n> **Review status:** The automated critic approved the current "
-            "synthesis. Human verification of the results and conclusions "
-            "is still required."
+            "\n> **Review status: INCOMPLETE.** "
+            "Information extraction could not be completed. "
+            "The results must not be interpreted as a completed systematic review."
         )
 
+    elif extraction_status == "partially_completed":
+        lines.append(
+            "\n> **Review status: PARTIALLY COMPLETED.** "
+            "Some eligible papers failed extraction. "
+            "The findings are based only on successfully extracted papers."
+        )
+
+    elif validation_status != "APPROVED":
+        lines.append(
+            "\n> **Review status: REQUIRES VALIDATION.** "
+            "The automated critic did not approve the current synthesis. "
+            "Human verification is required."
+        )
+
+    else:
+        lines.append(
+            "\n> **Review status: AUTOMATED VALIDATION APPROVED.** "
+            "Human verification of the results and conclusions is still required."
+        )
+    
     # 1. Research question
     section(
         "1. Research Question",
@@ -210,6 +225,24 @@ def generate_review_report(
     )
 
     # 8. Information extraction
+    extraction_summary = [
+        f"- **Extraction status:** {extraction_status}",
+        f"- **Eligible papers:** {len(eligible_papers)}",
+        f"- **Successfully extracted:** {len(extracted)}",
+        f"- **Failed extractions:** {len(extraction_failures)}"
+    ]
+
+    if extraction_failures:
+        extraction_summary.append(
+            "\n### Papers with Extraction Failures"
+        )
+
+        for failure in extraction_failures:
+            extraction_summary.append(
+                f"- **{failure.get('paper_title', 'Untitled')}**: "
+                f"{failure.get('error', 'Unknown error')}"
+            )
+
     extraction_sections = []
 
     for paper in extracted:
@@ -271,7 +304,9 @@ def generate_review_report(
 
     section(
         "8. Information Extraction",
-        "\n\n".join(extraction_sections)
+        "\n".join(extraction_summary)
+        + "\n\n"
+        + ("\n\n".join(extraction_sections) or "No papers were successfully extracted.")
     )
 
     # 9. Quality appraisal
@@ -331,9 +366,20 @@ def generate_review_report(
     section("12. Limitations", format_list(limitations))
 
     # 13. Execution log
+    execution_logs = state.get("execution_logs", [])
+
+    formatted_logs = [
+        (
+            f"[{log['timestamp']}] {log['message']}"
+            if isinstance(log, dict)
+            else log
+        )
+        for log in execution_logs
+    ]
+
     section(
         "13. Execution Log",
-        format_list(state.get("execution_logs", []))
+        format_list(formatted_logs)
     )
 
     report = "\n".join(lines)

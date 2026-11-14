@@ -3,6 +3,8 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from config.llm import get_llm
 
+from server.utils.logging import add_execution_logs
+
 load_dotenv()
 
 llm = get_llm()
@@ -108,7 +110,8 @@ def run_appraisal_agent(state):
     return {
         "quality_results": quality_results,
         "current_stage": "appraisal_completed",
-        "execution_logs": state.get("execution_logs", []) + [
+        "execution_logs": add_execution_logs(
+            state.get("execution_logs", []),
             f"Appraised {len(quality_results)} papers."
-        ]
+        )
     }

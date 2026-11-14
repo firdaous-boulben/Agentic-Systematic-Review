@@ -32,6 +32,8 @@ class ReviewState(TypedDict, total=False):
 
     # 6. Information extraction
     extracted_data: List[Dict[str, Any]]
+    extraction_failures: list
+    extraction_status: str
 
     # 7. Quality assessment
     quality_results: List[Dict[str, Any]]
@@ -49,7 +51,7 @@ class ReviewState(TypedDict, total=False):
 
     # 11. Execution tracking
     current_stage: str
-    execution_logs: List[str]
+    execution_logs: List[Dict[str, str]]
     errors: List[str]
 
     # PRISMA tracking

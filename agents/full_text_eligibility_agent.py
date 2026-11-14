@@ -4,6 +4,8 @@ from langchain_core.output_parsers import JsonOutputParser
 from config.llm import get_llm
 from rag.retriever import PaperRetriever
 
+from server.utils.logging import add_execution_logs
+
 import os
 
 
@@ -185,9 +187,9 @@ def run_full_text_eligibility_agent(state):
             "full_text_excluded_papers": [],
             "full_text_uncertain_papers": [],
             "current_stage": "eligibility_completed",
-            "execution_logs": state.get("execution_logs", []) + [
+            "execution_logs": add_execution_logs(state.get("execution_logs", []),
                 "Full-text eligibility completed: no PDFs were available for assessment."
-            ]
+            )
         }
 
     try:
@@ -201,9 +203,9 @@ def run_full_text_eligibility_agent(state):
             "full_text_excluded_papers": [],
             "full_text_uncertain_papers": [],
             "current_stage": "eligibility_failed",
-            "execution_logs": state.get("execution_logs", []) + [
+            "execution_logs": add_execution_logs(state.get("execution_logs", []),
                 f"Full-text eligibility failed: {error}"
-            ]
+            )
         }
 
     for index, paper in enumerate(papers, 1):
@@ -272,10 +274,13 @@ def run_full_text_eligibility_agent(state):
         "full_text_excluded_papers": excluded_papers,
         "full_text_uncertain_papers": uncertain_papers,
         "current_stage": "eligibility_completed",
-        "execution_logs": state.get("execution_logs", []) + [
-            f"Full-text papers assessed: {len(assessment_results)}.",
-            f"Eligible after full-text assessment: {len(eligible_papers)}.",
-            f"Excluded after full-text assessment: {len(excluded_papers)}.",
-            f"Uncertain after full-text assessment: {len(uncertain_papers)}."
-        ]
+        "execution_logs": add_execution_logs(
+            state.get("execution_logs", []),
+            [
+                f"Full-text papers assessed: {len(assessment_results)}.",
+                f"Eligible after full-text assessment: {len(eligible_papers)}.",
+                f"Excluded after full-text assessment: {len(excluded_papers)}.",
+                f"Uncertain after full-text assessment: {len(uncertain_papers)}."
+            ]
+        )
     }
