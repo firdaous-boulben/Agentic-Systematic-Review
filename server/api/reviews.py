@@ -1,7 +1,7 @@
 from uuid import uuid4
 from pathlib import Path
 from fastapi import APIRouter, BackgroundTasks, HTTPException
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, FileResponse
 
 from server.api.schemas import ReviewCreate, ScreeningDecision
 from server.services.review_service import (
@@ -16,6 +16,12 @@ from server.services.review_service import (
 from server.services.review_registry import (
     register_review,
     get_registered_reviews
+)
+from server.services.export_service import (
+    export_markdown,
+    export_pdf,
+    export_docx,
+    export_bibtex,
 )
 
 router = APIRouter(prefix="/api/reviews", tags=["Reviews"])
@@ -231,3 +237,71 @@ def continue_existing_review(
         "status": "resuming",
         "next_nodes": review["next_nodes"]
     }
+
+
+def create_export_response(review_id: str, exporter, media_type: str, filename: str):
+    review = get_review(review_id)
+
+    if not review:
+        raise HTTPException(status_code=404, detail="Review not found.")
+
+    try:
+        file_path = exporter(review_id, review)
+
+        return FileResponse(
+            path=str(file_path),
+            media_type=media_type,
+            filename=filename
+        )
+
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Export failed: {error}"
+        )
+
+
+@router.get("/{review_id}/export/markdown")
+def download_markdown(review_id: str):
+    return create_export_response(
+        review_id,
+        export_markdown,
+        "text/markdown",
+        "systematic_review_report.md"
+    )
+
+
+@router.get("/{review_id}/export/pdf")
+def download_pdf(review_id: str):
+    return create_export_response(
+        review_id,
+        export_pdf,
+        "application/pdf",
+        "systematic_review_report.pdf"
+    )
+
+
+@router.get("/{review_id}/export/docx")
+def download_docx(review_id: str):
+    return create_export_response(
+        review_id,
+        export_docx,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "systematic_review_report.docx"
+    )
+
+
+@router.get("/{review_id}/export/bibtex")
+def download_bibtex(review_id: str):
+    return create_export_response(
+        review_id,
+        export_bibtex,
+        "application/x-bibtex",
+        "references.bib"
+    )

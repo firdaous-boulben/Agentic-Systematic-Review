@@ -87,6 +87,7 @@ def get_review(review_id: str):
         "full_text_assessment_results": state.get(
             "full_text_assessment_results", []
         ),
+        "full_text_eligible_papers": state.get("full_text_eligible_papers", []),
 
         "extracted_data": state.get("extracted_data", []),
         "extraction_status": state.get("extraction_status"),

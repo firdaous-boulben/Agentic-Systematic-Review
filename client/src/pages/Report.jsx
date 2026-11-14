@@ -64,22 +64,61 @@ function Report({ review, reviewId }) {
     .split(/\s+/)
     .filter(Boolean).length;
 
+  const exportUrl = (format) => `/api/reviews/${reviewId}/export/${format}`;
+
   return (
     <div className="report-page">
       <div className="page-intro report-page-intro">
         <div>
           <h3>Final Report</h3>
-          <p>View and export the generated systematic review report.</p>
+          <p>View the generated report and download it in your preferred format.</p>
         </div>
 
-        <button
-          className="btn btn-primary"
-          onClick={handlePrint}
-          disabled={!reportContent || loading}
-        >
-          <i className="bi bi-file-earmark-pdf me-2"></i>
-          Export PDF
-        </button>
+        <div className="report-export-actions">
+          <a
+            className="report-export-btn"
+            href={exportUrl('markdown')}
+            onClick={(e) => {
+              if (!review?.final_report || loading) e.preventDefault();
+            }}
+          >
+            <i className="bi bi-markdown"></i>
+            <span>Markdown</span>
+          </a>
+
+          <a
+            className="report-export-btn"
+            href={exportUrl('pdf')}
+            onClick={(e) => {
+              if (!review?.final_report || loading) e.preventDefault();
+            }}
+          >
+            <i className="bi bi-file-earmark-pdf"></i>
+            <span>PDF</span>
+          </a>
+
+          <a
+            className="report-export-btn"
+            href={exportUrl('docx')}
+            onClick={(e) => {
+              if (!review?.final_report || loading) e.preventDefault();
+            }}
+          >
+            <i className="bi bi-file-earmark-word"></i>
+            <span>Word</span>
+          </a>
+
+          <a
+            className="report-export-btn"
+            href={exportUrl('bibtex')}
+            onClick={(e) => {
+              if (!review?.final_report || loading) e.preventDefault();
+            }}
+          >
+            <i className="bi bi-journal-text"></i>
+            <span>BibTeX</span>
+          </a>
+        </div>
       </div>
 
       <div className="report-overview">

@@ -13,3 +13,7 @@ matplotlib
 langgraph-checkpoint-sqlite
 fastapi
 uvicorn[standard]
+reportlab
+python-docx
+Markdown
+beautifulsoup4
