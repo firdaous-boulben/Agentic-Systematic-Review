@@ -55,8 +55,8 @@ pip install -r requirements.txt
 If you use the Conda environment:
 
 ```bash
-conda create -n agentic_systematic_review python=3.11 -y
-conda activate agentic_systematic_review
+conda create -n ReviewAI python=3.11 -y
+conda activate ReviewAI
 pip install -r requirements.txt
 ```
 
