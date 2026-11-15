@@ -40,7 +40,7 @@ ReviewAI is an AI-powered application that automates systematic literature revie
 ### Step 1 — Clone the repository
 
 ```bash
-git clone (https://github.com/firdaous-boulben/Agentic-Systematic-Review.git)
+git clone https://github.com/firdaous-boulben/Agentic-Systematic-Review.git
 cd Agentic-Systematic-Review
 ```
 
