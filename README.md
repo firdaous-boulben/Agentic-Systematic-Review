@@ -140,6 +140,15 @@ PRISMA & Final Report
 Scientific PDF
 ```
 
+## Project Documentation & Demo
+
+For a detailed explanation of the system's architecture, implementation, workflow, and results, see the [`documentation/`](./docs/) folder.
+
+The folder contains:
+
+- **Project Report:** Technical implementation, methodology, results, and limitations.
+- **Video Demo:** A walkthrough demonstrating the application's main features and complete workflow.
+
 ## 6. Token Monitoring
 
 Review Groq token consumption:
