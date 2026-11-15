@@ -1,7 +1,12 @@
+
 import os
 from datetime import datetime
 
-def generate_review_report(state, output_path="outputs/systematic_review_report.md"):
+
+def generate_review_report(
+    state,
+    output_path="outputs/systematic_review_report.md"
+):
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
     topic = state.get("topic", "Not specified")
@@ -22,20 +27,54 @@ def generate_review_report(state, output_path="outputs/systematic_review_report.
         lines.append(content if content else "Not available.")
 
     def format_list(items):
-        return "\n".join(f"- {item}" for item in items) if items else "Not available."
+        return (
+            "\n".join(f"- {item}" for item in items)
+            if items else "Not available."
+        )
 
-    # Title and status
+    def get_paper_sources(paper):
+        """Return all sources associated with a paper."""
+        sources = paper.get("sources") or []
+
+        if isinstance(sources, str):
+            sources = [sources]
+
+        if not sources and paper.get("source"):
+            sources = [paper["source"]]
+
+        return sources or ["Not specified"]
+
+    def count_records_by_source(papers):
+        """Count records associated with each source."""
+        counts = {}
+
+        for paper in papers:
+            for source in get_paper_sources(paper):
+                counts[source] = counts.get(source, 0) + 1
+
+        return counts
+
+    # --------------------------------------------------
+    # TITLE AND STATUS
+    # --------------------------------------------------
+
     lines.append(f"# Systematic Literature Review: {topic}")
+
     lines.append(
-        "\n**Generated:** " + datetime.now().strftime("%Y-%m-%d %H:%M")
+        "\n**Generated:** "
+        + datetime.now().strftime("%Y-%m-%d %H:%M")
     )
 
-    validation_status = state.get("validation_status", "Not recorded")
+    validation_status = state.get(
+        "validation_status", "Not recorded"
+    )
+
     human_approval = state.get("human_approval", False)
 
     lines.append(
         f"\n**Human screening approval:** {human_approval}"
     )
+
     lines.append(
         f"\n**Critic validation status:** {validation_status}"
     )
@@ -66,59 +105,160 @@ def generate_review_report(state, output_path="outputs/systematic_review_report.
             "\n> **Review status: AUTOMATED VALIDATION APPROVED.** "
             "Human verification of the results and conclusions is still required."
         )
-    
-    # 1. Research question
+
+    # --------------------------------------------------
+    # 1. RESEARCH QUESTION
+    # --------------------------------------------------
+
     section(
         "1. Research Question",
         state.get("research_question", "")
     )
 
-    # 2. Protocol
+    # --------------------------------------------------
+    # 2. REVIEW PROTOCOL
+    # --------------------------------------------------
+
     protocol_content = [
         "### Objectives",
         format_list(protocol.get("objectives", [])),
+
         "\n### Inclusion Criteria",
         format_list(protocol.get("inclusion_criteria", [])),
+
         "\n### Exclusion Criteria",
         format_list(protocol.get("exclusion_criteria", [])),
+
         "\n### Keywords",
         ", ".join(protocol.get("keywords", [])) or "Not available.",
+
         "\n### Planned Databases",
         ", ".join(protocol.get("databases", [])) or "Not available.",
+
         "\n### Publication Year Range",
         str(protocol.get("publication_year_range", "Not specified")),
+
         "\n### Topic-Specific Extraction Dimensions",
         format_list(protocol.get("extraction_dimensions", []))
     ]
 
-    section("2. Review Protocol", "\n".join(protocol_content))
+    section(
+        "2. Review Protocol",
+        "\n".join(protocol_content)
+    )
 
-    # 3. Search strategy
+    # --------------------------------------------------
+    # 3. LITERATURE SEARCH STRATEGY
+    # --------------------------------------------------
+
     search_queries = state.get("search_queries", [])
     retrieved_papers = state.get("retrieved_papers", [])
+    unique_papers = state.get("unique_papers", [])
 
-    search_sources = sorted({
-        paper.get("source", "Not specified")
-        for paper in retrieved_papers
-    })
+    # Prefer counts calculated by the PRISMA tracker.
+    records_by_source = prisma.get(
+        "records_identified_by_source"
+    )
+
+    if records_by_source is None:
+        records_by_source = count_records_by_source(
+            retrieved_papers
+        )
+
+    unique_by_source = prisma.get(
+        "unique_records_by_source"
+    )
+
+    if unique_by_source is None:
+        unique_by_source = count_records_by_source(
+            unique_papers
+        )
+
+    # Sources actually used in the search.
+    search_sources = sorted(records_by_source.keys())
+
+    if not search_sources:
+        search_sources = sorted({
+            source
+            for paper in retrieved_papers
+            for source in get_paper_sources(paper)
+        })
 
     search_content = [
         "### Search Sources",
         format_list(search_sources),
-        "\n### Search Queries",
-        format_list(search_queries)
+
+        "\n### Records Retrieved by Source"
     ]
 
-    section("3. Literature Search Strategy", "\n".join(search_content))
+    if records_by_source:
+        for source, count in sorted(records_by_source.items()):
+            search_content.append(
+                f"- **{source}:** {count} records"
+            )
+    else:
+        search_content.append("Not available.")
 
-    # 4. PRISMA statistics
-    prisma_content = "\n".join(
-        f"- **{key.replace('_', ' ').capitalize()}:** "
-        f"{value if value is not None else 'Not available'}"
-        for key, value in prisma.items()
+    search_content.append(
+        "\n### Unique Records Associated with Each Source"
     )
 
-    section("4. PRISMA Statistics", prisma_content)
+    if unique_by_source:
+        for source, count in sorted(unique_by_source.items()):
+            search_content.append(
+                f"- **{source}:** {count} unique records"
+            )
+    else:
+        search_content.append("Not available.")
+
+    search_content.extend([
+        "\n### Search Queries",
+        format_list(search_queries)
+    ])
+
+    section(
+        "3. Literature Search Strategy",
+        "\n".join(search_content)
+    )
+
+    # --------------------------------------------------
+    # 4. PRISMA STATISTICS
+    # --------------------------------------------------
+
+    prisma_content = []
+
+    source_count_keys = {
+        "records_identified_by_source",
+        "unique_records_by_source"
+    }
+
+    for key, value in prisma.items():
+
+        if key in source_count_keys:
+            continue
+
+        formatted_key = key.replace("_", " ").capitalize()
+
+        if value is None:
+            formatted_value = "Not available"
+
+        elif isinstance(value, dict):
+            formatted_value = ", ".join(
+                f"{source}: {count}"
+                for source, count in value.items()
+            )
+
+        else:
+            formatted_value = str(value)
+
+        prisma_content.append(
+            f"- **{formatted_key}:** {formatted_value}"
+        )
+
+    section(
+        "4. PRISMA Statistics",
+        "\n".join(prisma_content)
+    )
 
     diagram_path = state.get("prisma_diagram_path")
 
@@ -127,18 +267,20 @@ def generate_review_report(state, output_path="outputs/systematic_review_report.
             f"\n**PRISMA flow diagram:** `{diagram_path}`"
         )
 
-    
-    # 5. Title and abstract screening
+    # --------------------------------------------------
+    # 5. TITLE AND ABSTRACT SCREENING
+    # --------------------------------------------------
+
     screening_results = state.get("screening_results", [])
 
     completed_screening = [
         paper for paper in screening_results
-        if paper.get("screening_status") == "completed"
+        if paper.get("dual_screening_status") != "technical_error"
     ]
 
     technical_failures = [
         paper for paper in screening_results
-        if paper.get("screening_status") == "technical_error"
+        if paper.get("dual_screening_status") == "technical_error"
     ]
 
     included = [
@@ -156,12 +298,18 @@ def generate_review_report(state, output_path="outputs/systematic_review_report.
         if paper.get("screening_decision") == "Uncertain"
     ]
 
+    not_assessed = [
+        paper for paper in screening_results
+        if paper.get("dual_screening_status") == "not_assessed"
+    ]
+
     screening_summary = [
         f"- Records received for screening: {len(screening_results)}",
         f"- Successfully screened: {len(completed_screening)}",
         f"- Potentially included: {len(included)}",
         f"- Excluded: {len(excluded)}",
         f"- Genuine uncertain decisions: {len(uncertain)}",
+        f"- Not assessed (e.g. missing abstracts): {len(not_assessed)}",
         f"- Technical failures requiring retry: {len(technical_failures)}",
         f"- Human approval: {human_approval}"
     ]
@@ -177,11 +325,18 @@ def generate_review_report(state, output_path="outputs/systematic_review_report.
                 f"{paper.get('screening_reason', 'Technical error')}"
             )
 
-    section("5. Title and Abstract Screening", "\n".join(screening_summary))
+    section(
+        "5. Title and Abstract Screening",
+        "\n".join(screening_summary)
+    )
 
+    # --------------------------------------------------
+    # 6. FULL-TEXT RETRIEVAL
+    # --------------------------------------------------
 
-    # 6. Full-text retrieval
-    retrieval_results = state.get("pdf_retrieval_results", [])
+    retrieval_results = state.get(
+        "pdf_retrieval_results", []
+    )
 
     retrieval_lines = []
 
@@ -201,9 +356,15 @@ def generate_review_report(state, output_path="outputs/systematic_review_report.
                 f"  - Text extraction detail: {paper['pdf_text_error']}"
             )
 
-    section("6. Full-Text Retrieval", "\n".join(retrieval_lines))
+    section(
+        "6. Full-Text Retrieval",
+        "\n".join(retrieval_lines)
+    )
 
-    # 7. Full-text eligibility
+    # --------------------------------------------------
+    # 7. FULL-TEXT ELIGIBILITY
+    # --------------------------------------------------
+
     eligibility_results = state.get(
         "full_text_assessment_results", []
     )
@@ -211,9 +372,15 @@ def generate_review_report(state, output_path="outputs/systematic_review_report.
     eligibility_lines = []
 
     for paper in eligibility_results:
+        assessment_status = paper.get(
+            "assessment_status", "not_recorded"
+        )
+
         eligibility_lines.append(
             f"### {paper.get('title', 'Untitled')}\n"
-            f"- **Decision:** {paper.get('decision', 'Uncertain')}\n"
+            f"- **Assessment status:** {assessment_status}\n"
+            f"- **Decision:** "
+            f"{paper.get('decision') or 'Not assessed'}\n"
             f"- **Reason:** {paper.get('reason', 'Not provided')}\n"
             f"- **Evidence pages:** "
             f"{', '.join(map(str, paper.get('evidence_pages', []))) or 'Not available'}"
@@ -224,7 +391,10 @@ def generate_review_report(state, output_path="outputs/systematic_review_report.
         "\n\n".join(eligibility_lines)
     )
 
-    # 8. Information extraction
+    # --------------------------------------------------
+    # 8. INFORMATION EXTRACTION
+    # --------------------------------------------------
+
     extraction_summary = [
         f"- **Extraction status:** {extraction_status}",
         f"- **Eligible papers:** {len(eligible_papers)}",
@@ -270,12 +440,17 @@ def generate_review_report(state, output_path="outputs/systematic_review_report.
         }
 
         for key in universal_fields:
-            value = info.get(key, "Not reported in available text")
+            value = info.get(
+                key, "Not reported in available text"
+            )
+
             extraction_content.append(
                 f"- **{key.replace('_', ' ').capitalize()}:** {value}"
             )
 
-        topic_extractions = info.get("topic_specific_extractions", {})
+        topic_extractions = info.get(
+            "topic_specific_extractions", {}
+        )
 
         if topic_extractions:
             extraction_content.append(
@@ -290,7 +465,9 @@ def generate_review_report(state, output_path="outputs/systematic_review_report.
         evidence = info.get("evidence", [])
 
         if evidence:
-            extraction_content.append("\n**Evidence traceability:**")
+            extraction_content.append(
+                "\n**Evidence traceability:**"
+            )
 
             for item in evidence:
                 extraction_content.append(
@@ -300,16 +477,24 @@ def generate_review_report(state, output_path="outputs/systematic_review_report.
                     f"page {item.get('page_number', 'Unknown')})"
                 )
 
-        extraction_sections.append("\n".join(extraction_content))
+        extraction_sections.append(
+            "\n".join(extraction_content)
+        )
 
     section(
         "8. Information Extraction",
         "\n".join(extraction_summary)
         + "\n\n"
-        + ("\n\n".join(extraction_sections) or "No papers were successfully extracted.")
+        + (
+            "\n\n".join(extraction_sections)
+            or "No papers were successfully extracted."
+        )
     )
 
-    # 9. Quality appraisal
+    # --------------------------------------------------
+    # 9. QUALITY APPRAISAL
+    # --------------------------------------------------
+
     appraisal_sections = []
 
     for paper in quality:
@@ -322,7 +507,10 @@ def generate_review_report(state, output_path="outputs/systematic_review_report.
         ]
 
         for dimension, assessment in assessments.items():
-            rating = assessment.get("rating", "Not available")
+            rating = assessment.get(
+                "rating", "Not available"
+            )
+
             reason = assessment.get(
                 "reason", "No justification provided."
             )
@@ -332,29 +520,41 @@ def generate_review_report(state, output_path="outputs/systematic_review_report.
                 f"  - {reason}"
             )
 
-        appraisal_sections.append("\n".join(content))
+        appraisal_sections.append(
+            "\n".join(content)
+        )
 
     section(
         "9. Quality Appraisal",
         "\n\n".join(appraisal_sections)
     )
 
-    # 10. Synthesis
+    # --------------------------------------------------
+    # 10. EVIDENCE SYNTHESIS
+    # --------------------------------------------------
+
     section(
         "10. Evidence Synthesis",
         state.get("synthesis", "")
     )
 
-    # 11. Critic evaluation
+    # --------------------------------------------------
+    # 11. CRITIC EVALUATION
+    # --------------------------------------------------
+
     section(
         "11. Critic Evaluation",
         state.get("critic_feedback", "")
     )
 
-    # 12. Limitations
+    # --------------------------------------------------
+    # 12. LIMITATIONS
+    # --------------------------------------------------
+
     limitations = [
         "Academic search coverage is limited to the sources actually implemented in the search pipeline.",
         "The protocol's planned databases should not be interpreted as searched databases unless they were actually queried.",
+        "Records retrieved from multiple sources may overlap. Cross-source duplicates are merged during deduplication.",
         "Full-text eligibility decisions are based on passages retrieved through RAG and may not represent every relevant section of a paper.",
         "Papers without accessible PDFs could not undergo full-text eligibility assessment.",
         "LLM-assisted screening, extraction, appraisal, and synthesis require human verification.",
@@ -363,9 +563,15 @@ def generate_review_report(state, output_path="outputs/systematic_review_report.
         "The generated report and PRISMA diagram should be checked against the underlying records before publication."
     ]
 
-    section("12. Limitations", format_list(limitations))
+    section(
+        "12. Limitations",
+        format_list(limitations)
+    )
 
-    # 13. Execution log
+    # --------------------------------------------------
+    # 13. EXECUTION LOG
+    # --------------------------------------------------
+
     execution_logs = state.get("execution_logs", [])
 
     formatted_logs = [
@@ -382,11 +588,17 @@ def generate_review_report(state, output_path="outputs/systematic_review_report.
         format_list(formatted_logs)
     )
 
+    # --------------------------------------------------
+    # SAVE REPORT
+    # --------------------------------------------------
+
     report = "\n".join(lines)
 
     with open(output_path, "w", encoding="utf-8") as file:
         file.write(report)
 
-    print(f"\n[Report Generator] Report saved to: {output_path}")
+    print(
+        f"\n[Report Generator] Report saved to: {output_path}"
+    )
 
     return output_path

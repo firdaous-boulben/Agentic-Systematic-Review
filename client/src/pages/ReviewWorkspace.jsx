@@ -41,21 +41,98 @@ const statusLabels = {
   failed: 'Failed',
 };
 
-function getCurrentStageIndex(currentStage, status) {
-  if (status === 'completed') return stages.length;
-
+function getPipelineProgress(currentStage, status) {
   const stage = (currentStage || '').toLowerCase();
 
-  if (stage.includes('protocol')) return 0;
-  if (stage.includes('search')) return 1;
-  if (stage.includes('screen') || stage.includes('human_review')) return 2;
-  if (stage.includes('pdf') || stage.includes('full_text')) return 3;
-  if (stage.includes('extract')) return 4;
-  if (stage.includes('appraisal') || stage.includes('quality')) return 5;
-  if (stage.includes('synthesis') || stage.includes('critic')) return 6;
-  if (stage.includes('prisma') || stage.includes('report')) return 7;
+  // The number of stages already completed.
+  const completedStages = {
+    initialized: 0,
+    protocol_generated: 1,
+    search_completed: 2,
+    screening_completed: 3,
+    screening_approved: 3,
+    eligibility_completed: 4,
+    extraction_completed: 5,
+    appraisal_completed: 6,
+    synthesis_completed: 7,
+    critic_completed: 7,
+    report_generated: 8,
+  };
 
-  return -1;
+  // Explicitly identify the next active stage.
+  const activeStages = {
+    protocol: 0,
+    protocol_generating: 0,
+    searching: 1,
+    search: 1,
+    screening: 2,
+    screening_in_progress: 2,
+    human_review: 2,
+    pdf_preparation: 3,
+    full_text_eligibility: 3,
+    eligibility_retry_queued: 3,
+    extract: 4,
+    extraction: 4,
+    extraction_retry_queued: 4,
+    appraisal: 5,
+    synthesis: 6,
+    critic: 6,
+    prisma: 7,
+    prisma_diagram: 7,
+    report: 7,
+  };
+
+  if (status === 'completed') {
+    return {
+      completed: stages.length,
+      active: -1,
+      label: 'Completed',
+    };
+  }
+
+  if (status === 'awaiting_human_review') {
+    return {
+      completed: 2,
+      active: 2,
+      label: 'Awaiting Human Review',
+    };
+  }
+
+  if (Object.hasOwn(completedStages, stage)) {
+    const completed = completedStages[stage];
+
+    return {
+      completed,
+      active: completed < stages.length ? completed : -1,
+      label: completed < stages.length
+        ? `${stages[completed].title} `
+        : 'Report Generated',
+    };
+  }
+
+  if (Object.hasOwn(activeStages, stage)) {
+    const active = activeStages[stage];
+
+    return {
+      completed: active,
+      active,
+      label: `${stages[active].title}`,
+    };
+  }
+
+  if (stage === 'eligibility_partial' || stage === 'eligibility_failed') {
+    return {
+      completed: 3,
+      active: 3,
+      label: 'Full-text Screening – Incomplete',
+    };
+  }
+
+  return {
+    completed: 0,
+    active: -1,
+    label: 'Initializing',
+  };
 }
 
 export default function ReviewWorkspace() {
@@ -125,14 +202,13 @@ export default function ReviewWorkspace() {
   }
 
   const status = review.status || 'running';
-  const currentStageIndex = getCurrentStageIndex(
+  const pipeline = getPipelineProgress(
     review.current_stage,
     status
   );
 
-  const completedStages = currentStageIndex < 0
-    ? 0
-    : Math.min(currentStageIndex, stages.length);
+  const currentStageIndex = pipeline.active;
+  const completedStages = pipeline.completed;
 
   const progress = Math.round(
     (completedStages / stages.length) * 100
@@ -143,9 +219,7 @@ export default function ReviewWorkspace() {
     (review.excluded_papers?.length || 0) +
     (review.uncertain_papers?.length || 0);
 
-  const currentStageLabel = status === 'awaiting_human_review'
-    ? 'Awaiting Human Review'
-    : review.current_stage?.replaceAll('_', ' ') || 'Initializing';
+  const currentStageLabel = pipeline.label;
 
   return (
     <div className="workspace-page">

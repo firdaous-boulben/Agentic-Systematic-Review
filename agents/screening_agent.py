@@ -25,9 +25,7 @@ PROMPT_VERSION = "dual-review-v2"
 VALID_DECISIONS = {"Include", "Exclude", "Uncertain"}
 
 
-# ---------------------------------------------------------
 # Cache
-# ---------------------------------------------------------
 
 def load_screening_cache():
     if not CACHE_PATH.exists():
@@ -84,10 +82,30 @@ def get_cache_key(paper, state, reviewer_id):
         serialized.encode("utf-8")
     ).hexdigest()
 
+def is_rate_limit_error(error):
+    message = str(error).lower()
 
-# ---------------------------------------------------------
+    status_code = getattr(error, "status_code", None)
+
+    response = getattr(error, "response", None)
+    if response is not None:
+        status_code = status_code or getattr(
+            response, "status_code", None
+        )
+
+    return (
+        status_code == 429
+        or "429" in message
+        or "rate limit" in message
+        or "too many requests" in message
+        or "tokens per day" in message
+        or "tokens per minute" in message
+        or "tpm" in message
+        or "tpd" in message
+    )
+
+
 # Paper utilities
-# ---------------------------------------------------------
 
 def get_paper_id(paper, index):
     return (
@@ -149,9 +167,7 @@ def check_publication_year(paper, state):
         return None
 
 
-# ---------------------------------------------------------
 # Reviewer A: Strict eligibility assessment
-# ---------------------------------------------------------
 
 reviewer_a_prompt = ChatPromptTemplate.from_messages([
     (
@@ -222,9 +238,7 @@ Return exactly one result for each supplied paper.
 ])
 
 
-# ---------------------------------------------------------
 # Reviewer B: Research relevance and evidence assessment
-# ---------------------------------------------------------
 
 reviewer_b_prompt = ChatPromptTemplate.from_messages([
     (
@@ -303,16 +317,14 @@ reviewer_a_chain = reviewer_a_prompt | llm | parser
 reviewer_b_chain = reviewer_b_prompt | llm | parser
 
 
-# ---------------------------------------------------------
 # One reviewer assessment
-# ---------------------------------------------------------
 
 def assess_batch(batch, state, reviewer_id, cache):
     """
     Runs one reviewer's assessment for a batch.
 
     Returns:
-        paper_id -> decision, reason and assessment status
+        paper_id -> decision, reason and assessment status.
     """
 
     results = {}
@@ -333,6 +345,7 @@ def assess_batch(batch, state, reviewer_id, cache):
                 "reason": cached_result.get("reason", ""),
                 "status": "completed",
                 "cached": True,
+                "rate_limit": False,
             }
 
         else:
@@ -343,10 +356,8 @@ def assess_batch(batch, state, reviewer_id, cache):
     if not uncached_papers:
         return results
 
-    papers_payload = []
-
-    for paper, _, paper_id, _ in uncached_papers:
-        papers_payload.append({
+    papers_payload = [
+        {
             "paper_id": paper_id,
             "title": paper.get("title", ""),
             "abstract": paper.get("abstract", ""),
@@ -354,126 +365,168 @@ def assess_batch(batch, state, reviewer_id, cache):
             "authors": paper.get("authors", []),
             "journal": paper.get("journal", ""),
             "source": paper.get("source", ""),
-        })
-
-    try:
-        if reviewer_id == "reviewer_a":
-            chain = reviewer_a_chain
-        elif reviewer_id == "reviewer_b":
-            chain = reviewer_b_chain
-        else:
-            raise ValueError(
-                f"Unknown reviewer identity: {reviewer_id}"
-            )
-
-        response = chain.invoke({
-            "topic": state.get("topic", ""),
-            "research_question": state.get("research_question", ""),
-            "inclusion_criteria": json.dumps(
-                state.get("inclusion_criteria", []),
-                ensure_ascii=False
-            ),
-            "exclusion_criteria": json.dumps(
-                state.get("exclusion_criteria", []),
-                ensure_ascii=False
-            ),
-            "papers_json": json.dumps(
-                papers_payload,
-                ensure_ascii=False
-            ),
-        })
-
-        returned_results = response.get("results", [])
-
-        if not isinstance(returned_results, list):
-            raise ValueError(
-                "The screening response has no valid results list."
-            )
-
-        returned_by_id = {
-            str(item.get("paper_id")): item
-            for item in returned_results
-            if (
-                isinstance(item, dict)
-                and item.get("paper_id") is not None
-            )
         }
+        for paper, _, paper_id, _ in uncached_papers
+    ]
 
-        for paper, _, paper_id, cache_key in uncached_papers:
-            item = returned_by_id.get(str(paper_id))
+    if reviewer_id == "reviewer_a":
+        chain = reviewer_a_chain
+    elif reviewer_id == "reviewer_b":
+        chain = reviewer_b_chain
+    else:
+        raise ValueError(
+            f"Unknown reviewer identity: {reviewer_id}"
+        )
 
-            if not item:
-                results[paper_id] = {
-                    "decision": "Uncertain",
-                    "reason": (
-                        "The reviewer did not return a result "
-                        "for this paper."
-                    ),
-                    "status": "technical_error",
-                    "cached": False,
-                }
-                continue
+    payload = {
+        "topic": state.get("topic", ""),
+        "research_question": state.get("research_question", ""),
+        "inclusion_criteria": json.dumps(
+            state.get("inclusion_criteria", []),
+            ensure_ascii=False
+        ),
+        "exclusion_criteria": json.dumps(
+            state.get("exclusion_criteria", []),
+            ensure_ascii=False
+        ),
+        "papers_json": json.dumps(
+            papers_payload,
+            ensure_ascii=False
+        ),
+    }
 
-            decision = str(
-                item.get("decision", "")
-            ).strip().capitalize()
+    max_retries = 2
+    rate_limit_reached = False
 
-            reason = str(
-                item.get("reason", "")
-            ).strip()
+    for attempt in range(max_retries + 1):
 
-            if decision not in VALID_DECISIONS:
-                results[paper_id] = {
-                    "decision": "Uncertain",
-                    "reason": (
-                        "The reviewer returned an invalid "
-                        "screening decision."
-                    ),
-                    "status": "technical_error",
-                    "cached": False,
-                }
-                continue
+        try:
+            response = chain.invoke(payload)
 
-            if not reason:
-                reason = (
-                    "No justification was provided by the reviewer."
+            if not isinstance(response, dict):
+                raise ValueError(
+                    "Invalid screening response format."
                 )
 
-            reviewer_result = {
-                "decision": decision,
-                "reason": reason,
-                "status": "completed",
-                "cached": False,
+            returned_results = response.get("results", [])
+
+            if not isinstance(returned_results, list):
+                raise ValueError(
+                    "The screening response has no valid results list."
+                )
+
+            returned_by_id = {
+                str(item.get("paper_id")): item
+                for item in returned_results
+                if (
+                    isinstance(item, dict)
+                    and item.get("paper_id") is not None
+                )
             }
 
-            results[paper_id] = reviewer_result
+            for _, _, paper_id, cache_key in uncached_papers:
 
-            cache[cache_key] = {
-                "decision": decision,
-                "reason": reason,
-            }
+                item = returned_by_id.get(str(paper_id))
 
-        save_screening_cache(cache)
+                if not item:
+                    results[paper_id] = {
+                        "decision": None,
+                        "reason": (
+                            "The reviewer did not return a result "
+                            "for this paper."
+                        ),
+                        "status": "technical_error",
+                        "cached": False,
+                        "rate_limit": False,
+                    }
+                    continue
 
-    except Exception as error:
-        error_message = str(error)
+                decision = str(
+                    item.get("decision", "")
+                ).strip().capitalize()
 
-        for _, _, paper_id, _ in uncached_papers:
-            results[paper_id] = {
-                "decision": "Uncertain",
-                "reason": (
-                    f"Reviewer assessment failed: {error_message}"
-                ),
-                "status": "technical_error",
-                "cached": False,
-            }
+                reason = str(
+                    item.get("reason", "")
+                ).strip()
+
+                if decision not in VALID_DECISIONS:
+                    results[paper_id] = {
+                        "decision": None,
+                        "reason": (
+                            "The reviewer returned an invalid "
+                            "screening decision."
+                        ),
+                        "status": "technical_error",
+                        "cached": False,
+                        "rate_limit": False,
+                    }
+                    continue
+
+                if not reason:
+                    reason = (
+                        "No justification was provided by the reviewer."
+                    )
+
+                reviewer_result = {
+                    "decision": decision,
+                    "reason": reason,
+                    "status": "completed",
+                    "cached": False,
+                    "rate_limit": False,
+                }
+
+                results[paper_id] = reviewer_result
+
+                cache[cache_key] = {
+                    "decision": decision,
+                    "reason": reason,
+                }
+
+            save_screening_cache(cache)
+
+            return results
+
+        except Exception as error:
+
+            if is_rate_limit_error(error):
+
+                if attempt < max_retries:
+
+                    wait_time = 6 * (attempt + 1)
+
+                    print(
+                        f"[Screening Agent] {reviewer_id} "
+                        f"rate limit reached. Retrying in "
+                        f"{wait_time} seconds..."
+                    )
+
+                    import time
+                    time.sleep(wait_time)
+
+                    continue
+
+                rate_limit_reached = True
+
+            print(
+                f"[Screening Agent] {reviewer_id} "
+                f"assessment failed: {error}"
+            )
+
+            for _, _, paper_id, _ in uncached_papers:
+                results[paper_id] = {
+                    "decision": None,
+                    "reason": str(error),
+                    "status": "technical_error",
+                    "cached": False,
+                    "rate_limit": rate_limit_reached,
+                }
+
+            return results
 
     return results
 
 
-# ---------------------------------------------------------
 # Agreement calculation
-# ---------------------------------------------------------
 
 def calculate_screening_agreement(dual_results):
     """
@@ -569,16 +622,9 @@ def calculate_screening_agreement(dual_results):
     }
 
 
-# ---------------------------------------------------------
 # Final decision from two reviewers
-# ---------------------------------------------------------
 
-def combine_reviewer_assessments(
-    paper,
-    paper_id,
-    reviewer_a,
-    reviewer_b
-):
+def combine_reviewer_assessments(paper, paper_id, reviewer_a, reviewer_b):
     assessments = {
         "reviewer_a": reviewer_a,
         "reviewer_b": reviewer_b,
@@ -597,10 +643,10 @@ def combine_reviewer_assessments(
 
     if not both_completed:
         result.update({
-            "screening_decision": "Uncertain",
+            "screening_decision": None,
             "screening_reason": (
-                "At least one reviewer assessment failed. "
-                "Manual assessment is required."
+                "At least one reviewer assessment failed technically. "
+                "The paper requires reassessment."
             ),
             "dual_screening_status": "technical_error",
         })
@@ -638,9 +684,7 @@ def combine_reviewer_assessments(
     return result
 
 
-# ---------------------------------------------------------
 # Main screening agent
-# ---------------------------------------------------------
 
 def run_screening_agent(state, max_papers=None):
     print("\n[Screening Agent] Starting dual screening...")
@@ -697,7 +741,11 @@ def run_screening_agent(state, max_papers=None):
         prepared_papers.append((paper, index))
 
     # Run the two reviewers independently.
+    stop_processing = False
+    rate_limit_reached = False
+
     for start in range(0, len(prepared_papers), BATCH_SIZE):
+
         batch = prepared_papers[start:start + BATCH_SIZE]
 
         print(
@@ -712,6 +760,18 @@ def run_screening_agent(state, max_papers=None):
             cache
         )
 
+        reviewer_a_results.update(reviewer_a_batch)
+
+        # Stop before calling Reviewer B if Reviewer A reached
+        # the provider rate limit.
+        if any(
+            result.get("rate_limit")
+            for result in reviewer_a_batch.values()
+        ):
+            stop_processing = True
+            rate_limit_reached = True
+            break
+
         reviewer_b_batch = assess_batch(
             batch,
             state,
@@ -719,9 +779,19 @@ def run_screening_agent(state, max_papers=None):
             cache
         )
 
-        reviewer_a_results.update(reviewer_a_batch)
         reviewer_b_results.update(reviewer_b_batch)
 
+        if any(
+            result.get("rate_limit")
+            for result in reviewer_b_batch.values()
+        ):
+            stop_processing = True
+            rate_limit_reached = True
+            break
+
+    # Papers not processed because of a rate limit remain
+    # without completed assessments and can be retried later.
+    
     # Combine reviewer assessments.
     dual_screening_results = []
     screening_results = []
@@ -730,15 +800,15 @@ def run_screening_agent(state, max_papers=None):
         paper_id = get_paper_id(paper, index)
 
         reviewer_a = reviewer_a_results.get(paper_id, {
-            "decision": "Uncertain",
-            "reason": "No result returned by Reviewer A.",
+            "decision": None,
+            "reason": "Reviewer A assessment was not completed.",
             "status": "technical_error",
             "cached": False,
         })
 
         reviewer_b = reviewer_b_results.get(paper_id, {
-            "decision": "Uncertain",
-            "reason": "No result returned by Reviewer B.",
+            "decision": None,
+            "reason": "Reviewer B assessment was not completed.",
             "status": "technical_error",
             "cached": False,
         })
@@ -778,14 +848,21 @@ def run_screening_agent(state, max_papers=None):
         if paper.get("dual_screening_status") == "needs_adjudication"
     ]
 
-    agreement = calculate_screening_agreement(
-        dual_screening_results
-    )
+    agreement = calculate_screening_agreement(dual_screening_results)
 
     technical_failures = [
-        paper for paper in uncertain
+        paper for paper in screening_results
         if paper.get("dual_screening_status") == "technical_error"
     ]
+
+    # A screening stage is incomplete if technical failures remain.
+    screening_incomplete = bool(technical_failures)
+
+    current_stage = (
+        "screening_partial"
+        if screening_incomplete
+        else "screening_completed"
+    )
 
     print(
         f"[Screening Agent] Completed: "
@@ -803,13 +880,25 @@ def run_screening_agent(state, max_papers=None):
 
     logs = add_execution_logs(
         state.get("execution_logs", []),
-        (
-            "Screening Agent: Dual screening completed. "
-            f"{len(included)} included, "
-            f"{len(excluded)} excluded, "
-            f"{len(uncertain)} uncertain, "
-            f"{len(disagreements)} disagreements."
-        )
+        [
+            (
+                "Screening Agent: "
+                f"{len(included)} included, "
+                f"{len(excluded)} excluded, "
+                f"{len(uncertain)} uncertain, "
+                f"{len(disagreements)} disagreements."
+            ),
+            (
+                f"Technical screening failures: "
+                f"{len(technical_failures)}."
+            ),
+            (
+                "Screening stopped because of a provider rate limit."
+                if rate_limit_reached
+                else "No provider rate limit interrupted screening."
+            ),
+            f"Screening stage: {current_stage}."
+        ]
     )
 
     return {
@@ -825,7 +914,7 @@ def run_screening_agent(state, max_papers=None):
         "screening_disagreements": disagreements,
         "screening_adjudication_results": [],
 
-        "current_stage": "screening_completed",
+        "current_stage": current_stage,
         "execution_logs": logs,
 
         # Diagnostic information.

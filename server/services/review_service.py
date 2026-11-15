@@ -32,6 +32,9 @@ def get_review(review_id: str):
     elif state.get("current_stage") == "failed":
         status = "failed"
 
+    elif not snapshot.next and state.get("current_stage") == "screening_partial":
+            status = "screening_incomplete"
+
     elif (
         not snapshot.next
         and state.get("extraction_status") in [
@@ -40,6 +43,12 @@ def get_review(review_id: str):
         ]
     ):
         status = "extraction_incomplete"
+
+    elif not snapshot.next and state.get("current_stage") in [
+            "eligibility_partial",
+            "eligibility_failed",
+        ]:
+            status = "eligibility_incomplete"
 
     elif not snapshot.next and state.get("final_report"):
         status = "completed"
@@ -134,6 +143,51 @@ def get_all_checkpoint_reviews():
     finally:
         connection.close()
 
+def prepare_screening_retry(review_id: str):
+    config = get_config(review_id)
+    snapshot = review_graph.get_state(config)
+
+    if not snapshot.values:
+        raise ValueError("Review not found.")
+
+    if snapshot.next:
+        raise ValueError("Review is still running.")
+
+    state = snapshot.values
+
+    if state.get("current_stage") != "screening_partial":
+        raise ValueError("This review does not require screening recovery.")
+
+    if not state.get("unique_papers"):
+        raise ValueError("No papers are available for screening.")
+
+    review_graph.update_state(
+        config,
+        {"current_stage": "screening_retry_queued"},
+        as_node="search"
+    )
+
+    updated_snapshot = review_graph.get_state(config)
+
+    if "screening" not in updated_snapshot.next:
+        raise RuntimeError(
+            "Could not schedule the screening node. "
+            "Check the graph transition from search to screening."
+        )
+
+def continue_screening_retry(review_id: str):
+    config = get_config(review_id)
+    snapshot = review_graph.get_state(config)
+
+    if not snapshot.values:
+        raise ValueError("Review checkpoint not found.")
+
+    if "screening" not in snapshot.next:
+        raise ValueError("Screening is not the next pending node.")
+
+    print("[Review Service] Retrying screening...")
+    return review_graph.invoke(None, config)
+
 def prepare_extraction_retry(review_id: str):
     config = get_config(review_id)
     snapshot = review_graph.get_state(config)
@@ -165,12 +219,70 @@ def prepare_extraction_retry(review_id: str):
         as_node="full_text_eligibility"
     )
 
-
 def continue_extraction_retry(review_id: str):
     config = get_config(review_id)
 
     # Continue from the checkpoint's scheduled extraction node.
     review_graph.invoke(None, config)
+
+def prepare_full_text_eligibility_retry(review_id: str):
+    config = get_config(review_id)
+    snapshot = review_graph.get_state(config)
+
+    if not snapshot.values:
+        raise ValueError("Review not found.")
+
+    if snapshot.next:
+        raise ValueError("Review is still running.")
+
+    state = snapshot.values
+
+    if state.get("current_stage") not in [
+        "eligibility_partial",
+        "eligibility_failed",
+        "report_generated",
+        "extraction_skipped",
+    ]:
+        raise ValueError(
+            "This review is not ready for full-text eligibility recovery."
+        )
+
+    if not state.get("full_text_available_papers"):
+        raise ValueError("No full-text papers are available for reassessment.")
+
+    # Schedule full-text eligibility without rerunning previous stages.
+    # pdf_preparation is the predecessor of full_text_eligibility.
+    review_graph.update_state(
+        config,
+        {
+            "current_stage": "eligibility_retry_queued"
+        },
+        as_node="pdf_preparation"
+    )
+
+    updated_snapshot = review_graph.get_state(config)
+
+    if "full_text_eligibility" not in updated_snapshot.next:
+        raise RuntimeError(
+            "Could not schedule the full-text eligibility node."
+        )
+
+def continue_full_text_eligibility_retry(review_id: str):
+    config = get_config(review_id)
+    snapshot = review_graph.get_state(config)
+
+    if not snapshot.values:
+        raise ValueError("Review checkpoint not found.")
+
+    if "full_text_eligibility" not in snapshot.next:
+        raise ValueError(
+            "Full-text eligibility is not the next pending node."
+        )
+
+    print("[Review Service] Retrying full-text eligibility...")
+
+    return review_graph.invoke(None, config)
+
 
 def continue_review(review_id: str):
     config = get_config(review_id)

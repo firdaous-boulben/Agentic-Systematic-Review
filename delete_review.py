@@ -1,7 +1,7 @@
 
 import sqlite3
 
-REVIEW_ID = "98542685-f9b5-48d4-8b08-917e034c87d1"
+REVIEW_ID = "8772a051-14e2-4bf4-a036-30b138013564"
 
 REGISTRY_DB = "data/review_registry.sqlite"
 CHECKPOINT_DB = "data/review_checkpoints.sqlite"

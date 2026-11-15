@@ -34,6 +34,9 @@ class ReviewState(TypedDict, total=False):
     full_text_eligible_papers: List[Dict[str, Any]]
     full_text_excluded_papers: List[Dict[str, Any]]
     full_text_uncertain_papers: List[Dict[str, Any]]
+    full_text_error_papers: List[Dict[str, Any]]
+    full_text_retrieval_failed_papers: List[Dict[str, Any]]
+    full_text_pending_papers: List[Dict[str, Any]]
 
     # 6. Information extraction
     extracted_data: List[Dict[str, Any]]

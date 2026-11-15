@@ -3,16 +3,21 @@ import json
 import hashlib
 import chromadb
 
+from pathlib import Path
 from sentence_transformers import SentenceTransformer
 
 
-PROCESSED_DIR = "data/processed"
-CHROMA_DIR = "data/chroma_db"
+ROOT_DIR = Path(__file__).resolve().parent.parent
+
+PROCESSED_DIR = str(ROOT_DIR / "data" / "processed")
+CHROMA_DIR = str(ROOT_DIR / "data" / "chroma_db")
 
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
+
+BATCH_SIZE = 5000
 
 
 def split_text(text):
@@ -34,15 +39,13 @@ def split_text(text):
     return chunks
 
 
-
 def build_index():
 
     os.makedirs(PROCESSED_DIR, exist_ok=True)
     os.makedirs(CHROMA_DIR, exist_ok=True)
 
-    print("\n[RAG] Loading embedding model...")
-
-    model = SentenceTransformer(MODEL_NAME)
+    print("[RAG] Processed directory:", PROCESSED_DIR)
+    print("[RAG] Database directory:", CHROMA_DIR)
 
     client = chromadb.PersistentClient(
         path=CHROMA_DIR
@@ -61,19 +64,22 @@ def build_index():
 
     for filename in sorted(os.listdir(PROCESSED_DIR)):
 
-        if not filename.endswith(".json"):
+        if not filename.endswith(".json") or filename == "screening_cache.json":
             continue
 
-        filepath = os.path.join(
-            PROCESSED_DIR,
-            filename
-        )
+        filepath = os.path.join(PROCESSED_DIR, filename)
 
         with open(filepath, "r", encoding="utf-8") as file:
             paper_data = json.load(file)
 
+        pages = paper_data.get("pages", [])
+
+        if not pages:
+            print(f"[RAG] Skipping {filename}: no extracted pages.")
+            continue
+
         source_pdf = os.path.basename(
-            paper_data.get("source_pdf", filename)
+            paper_data.get("source_pdf") or filename.replace(".json", ".pdf")
         )
 
         for page in paper_data.get("pages", []):
@@ -103,32 +109,55 @@ def build_index():
                 ids.append(unique_id)
 
     if not documents:
-
         print("[RAG] No text chunks found.")
-
         return 0
 
     print(f"[RAG] Generated {len(documents)} chunks.")
-    print("[RAG] Generating embeddings...")
 
-    embeddings = model.encode(
-        documents,
-        show_progress_bar=True
-    ).tolist()
+    print("[RAG] Loading embedding model...")
+    model = SentenceTransformer(MODEL_NAME)
 
-    collection.upsert(
-        ids=ids,
-        documents=documents,
-        metadatas=metadatas,
-        embeddings=embeddings
-    )
+    total_indexed = 0
+
+    for start in range(0, len(documents), BATCH_SIZE):
+
+        end = min(start + BATCH_SIZE, len(documents))
+
+        batch_documents = documents[start:end]
+        batch_metadatas = metadatas[start:end]
+        batch_ids = ids[start:end]
+
+        print(
+            f"\n[RAG] Indexing batch "
+            f"{start // BATCH_SIZE + 1}: "
+            f"{len(batch_documents)} chunks"
+        )
+
+        embeddings = model.encode(
+            batch_documents,
+            show_progress_bar=True
+        ).tolist()
+
+        collection.upsert(
+            ids=batch_ids,
+            documents=batch_documents,
+            metadatas=batch_metadatas,
+            embeddings=embeddings
+        )
+
+        total_indexed += len(batch_documents)
+
+        print(
+            f"[RAG] Progress: {total_indexed}/{len(documents)}"
+        )
 
     print("\n========== RAG INDEX SUMMARY ==========")
-    print("New chunks processed:", len(documents))
+    print("Chunks processed:", len(documents))
+    print("Chunks indexed:", total_indexed)
     print("Collection size:", collection.count())
     print("Database location:", CHROMA_DIR)
 
-    return len(documents)
+    return total_indexed
 
 
 if __name__ == "__main__":

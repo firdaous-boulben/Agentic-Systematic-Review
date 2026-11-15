@@ -52,6 +52,16 @@ def screening_node(state: ReviewState):
     print("\n[Coordinator] Calling Screening Agent...")
     return run_screening_agent(state)
 
+def screening_router(state: ReviewState):
+    if state.get("current_stage") == "screening_completed":
+        return "human_review"
+
+    print(
+        "[Coordinator] Screening is incomplete. "
+        "Stopping before human review."
+    )
+    return END
+
 def human_review_node(state: ReviewState):
     uncertain_papers = state.get("uncertain_papers", [])
 
@@ -252,6 +262,25 @@ def approval_router(state: ReviewState):
         return "pdf_preparation"
     return END
 
+def eligibility_router(state: ReviewState):
+    status = state.get("current_stage")
+
+    if status == "eligibility_completed":
+        if state.get("full_text_eligible_papers"):
+            return "extract"
+
+        print(
+            "[Coordinator] No eligible full-text papers. "
+            "Skipping extraction and proceeding to PRISMA."
+        )
+        return "prisma"
+
+    print(
+        f"[Coordinator] Full-text eligibility is {status}. "
+        "Stopping before extraction."
+    )
+    return END
+
 def extraction_router(state: ReviewState):
     status = state.get("extraction_status")
     if status == "completed":
@@ -333,10 +362,10 @@ builder.add_edge(START, "coordinator")
 builder.add_edge("coordinator", "protocol")
 builder.add_edge("protocol", "search")
 builder.add_edge("search", "screening")
-builder.add_edge("screening", "human_review")
+builder.add_conditional_edges("screening", screening_router, {"human_review": "human_review", END: END})
 builder.add_conditional_edges("human_review", approval_router, {"pdf_preparation": "pdf_preparation", END: END})
 builder.add_edge("pdf_preparation", "full_text_eligibility")
-builder.add_edge("full_text_eligibility", "extract")
+builder.add_conditional_edges("full_text_eligibility", eligibility_router,{"extract": "extract", "prisma": "prisma", END: END,})
 builder.add_conditional_edges("extract", extraction_router, {"appraisal": "appraisal", "prisma": "prisma", END: END})
 builder.add_edge("appraisal", "synthesis")
 builder.add_edge("synthesis", "critic")

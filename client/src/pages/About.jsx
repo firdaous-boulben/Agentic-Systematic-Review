@@ -1,3 +1,4 @@
+import logo from '../assets/logo.png';
 
 const features = [
   {
@@ -71,7 +72,7 @@ export default function About() {
           <div className="about-orbit orbit-one"></div>
           <div className="about-orbit orbit-two"></div>
           <div className="about-hero-icon">
-            <i className="bi bi-diagram-3"></i>
+            <img src={logo} alt="ReviewAI logo" />
           </div>
           <div className="about-floating-icon floating-one">
             <i className="bi bi-journal-text"></i>

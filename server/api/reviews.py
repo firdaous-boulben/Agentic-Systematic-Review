@@ -10,8 +10,12 @@ from server.services.review_service import (
     continue_review,
     get_review,
     get_all_checkpoint_reviews,
+    prepare_screening_retry,
+    continue_screening_retry,
     prepare_extraction_retry,
-    continue_extraction_retry
+    continue_extraction_retry,
+    prepare_full_text_eligibility_retry,
+    continue_full_text_eligibility_retry,
 )
 from server.services.review_registry import (
     register_review,
@@ -28,10 +32,7 @@ router = APIRouter(prefix="/api/reviews", tags=["Reviews"])
 
 
 @router.post("/")
-def create_review(
-    payload: ReviewCreate,
-    background_tasks: BackgroundTasks
-):
+def create_review(payload: ReviewCreate, background_tasks: BackgroundTasks):
     review_id = str(uuid4())
 
     register_review(review_id, payload.topic)
@@ -147,12 +148,35 @@ def approve_screening(
         "status": "resuming"
     }
 
+@router.post("/{review_id}/retry-screening")
+def retry_screening(review_id: str, background_tasks: BackgroundTasks):
+    review = get_review(review_id)
+
+    if not review:
+        raise HTTPException(status_code=404, detail="Review not found.")
+
+    if review.get("status") != "screening_incomplete":
+        raise HTTPException(
+            status_code=400,
+            detail="This review does not require screening recovery."
+        )
+
+    try:
+        prepare_screening_retry(review_id)
+        background_tasks.add_task(continue_screening_retry, review_id)
+
+        return {
+            "message": "Screening retry started.",
+            "review_id": review_id
+        }
+
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    except RuntimeError as error:
+        raise HTTPException(status_code=500, detail=str(error))
 
 @router.post("/{review_id}/retry-extraction")
-def retry_extraction(
-    review_id: str,
-    background_tasks: BackgroundTasks
-):
+def retry_extraction(review_id: str, background_tasks: BackgroundTasks):
     review = get_review(review_id)
 
     if review is None:
@@ -184,6 +208,54 @@ def retry_extraction(
     return {
         "review_id": review_id,
         "status": "retrying_extraction"
+    }
+
+@router.post("/{review_id}/retry-full-text-eligibility")
+def retry_full_text_eligibility(review_id: str, background_tasks: BackgroundTasks):
+    review = get_review(review_id)
+
+    if review is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Review not found."
+        )
+
+    allowed_stages = [
+        "eligibility_partial",
+        "eligibility_failed",
+        "report_generated",
+        "extraction_skipped",
+    ]
+
+    if review.get("current_stage") not in allowed_stages:
+        raise HTTPException(
+            status_code=400,
+            detail="This review is not ready for full-text eligibility recovery."
+        )
+
+    try:
+        prepare_full_text_eligibility_retry(review_id)
+
+    except ValueError as error:
+        raise HTTPException(
+            status_code=409,
+            detail=str(error)
+        )
+
+    except RuntimeError as error:
+        raise HTTPException(
+            status_code=409,
+            detail=str(error)
+        )
+
+    background_tasks.add_task(
+        continue_full_text_eligibility_retry,
+        review_id
+    )
+
+    return {
+        "review_id": review_id,
+        "status": "retrying_full_text_eligibility"
     }
 
 @router.get("/{review_id}/report", response_class=PlainTextResponse)
