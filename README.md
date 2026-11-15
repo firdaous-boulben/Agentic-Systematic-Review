@@ -2,8 +2,6 @@
 
 ReviewAI is an AI-powered application that automates systematic literature reviews, from a research question to a structured scientific paper in PDF format.
 
-It combines **AI agents, Python automation, and Retrieval-Augmented Generation (RAG)** to reduce manual work and LLM token consumption.
-
 ## 1. Features
 
 - Automatic research protocol generation
@@ -42,7 +40,7 @@ It combines **AI agents, Python automation, and Retrieval-Augmented Generation (
 ### Step 1 — Clone the repository
 
 ```bash
-git clone <repository-url>
+git clone [<repository-url>](https://github.com/firdaous-boulben/Agentic-Systematic-Review.git)
 cd Agentic-Systematic-Review
 ```
 
@@ -54,10 +52,12 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-If you already use the project's Conda environment:
+If you use the Conda environment:
 
 ```bash
-conda activate siham
+conda create -n agentic_systematic_review python=3.11 -y
+conda activate agentic_systematic_review
+pip install -r requirements.txt
 ```
 
 ### Step 3 — Configure API keys
@@ -72,8 +72,6 @@ OPENALEX_API_KEY=your_openalex_api_key
 CROSSREF_MAILTO=your_email@example.com
 ```
 
-Never commit your `.env` file to Git.
-
 ## 4. Run the Application
 
 ### Terminal 1 — Backend
@@ -83,10 +81,7 @@ From the project root:
 ```bash
 export CUDA_VISIBLE_DEVICES=""
 
-python -m uvicorn server.main:app \
-  --reload \
-  --host 127.0.0.1 \
-  --port 8765
+python -m uvicorn server.main:app --reload --host 127.0.0.1 --port 8765
 ```
 
 Backend: http://127.0.0.1:8765
@@ -212,7 +207,3 @@ Agentic-Systematic-Review/
 - AI-generated assessments may contain errors.
 - The six-page manuscript target depends on the volume of evidence and references.
 - Researcher verification is required before academic submission.
-
-## License
-
-Specify the project's license before public distribution.
