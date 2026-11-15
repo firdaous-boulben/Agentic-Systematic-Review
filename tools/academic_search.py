@@ -3,7 +3,10 @@ import os
 import re
 import html
 import requests
-
+import pymupdf
+import time
+    
+from urllib.parse import urlparse, quote
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -418,5 +421,419 @@ def search_crossref(query, max_results=10):
     ]
 
     print(f"[Crossref] Retrieved {len(papers)} papers.")
+
+    return papers
+
+def extract_abstract_from_pdf_url(pdf_url):
+    """
+    Recover an abstract directly from a PDF.
+
+    Uses Python only.
+    Returns an empty string if extraction fails.
+    """
+
+    if not pdf_url or urlparse(pdf_url).scheme not in ("http", "https"):
+        return ""
+
+    try:
+        # Download PDF with a 20 MB safety limit.
+        content = bytearray()
+
+        with requests.get(
+            pdf_url,
+            timeout=(10, 45),
+            stream=True
+        ) as response:
+
+            response.raise_for_status()
+
+            for chunk in response.iter_content(chunk_size=65536):
+                content.extend(chunk)
+
+                if len(content) > 20 * 1024 * 1024:
+                    return ""
+
+        if not content.startswith(b"%PDF"):
+            return ""
+
+        # Read the first five pages.
+        with pymupdf.open(
+            stream=bytes(content),
+            filetype="pdf"
+        ) as document:
+
+            text = "\n".join(
+                document[i].get_text("text")
+                for i in range(min(5, len(document)))
+            )
+
+        # Identify the abstract section.
+        match = re.search(
+            r"\bABSTRACT\s*:?\s*(.*?)\s*"
+            r"(?:RECOMMENDED\s+CITATION\s*:|"
+            r"KEYWORDS\s*:|"
+            r"JEL\s+(?:CLASSIFICATION|CODES)\s*:|"
+            r"1[.\s]+INTRODUCTION\b)",
+            text,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+
+        if not match:
+            return ""
+
+        abstract = re.sub(
+            r"\s+",
+            " ",
+            match.group(1)
+        ).strip()
+
+        # Reject suspicious extraction results.
+        if not 80 <= len(abstract) <= 3000:
+            return ""
+
+        return abstract
+
+    except Exception as error:
+        print(
+            "[Metadata] PDF abstract extraction failed:",
+            type(error).__name__
+        )
+
+        return ""
+
+def enrich_missing_abstracts(papers):
+    """
+    Recover missing abstracts from OpenAlex.
+    Preserve the original DOI and existing paper structure.
+    """
+
+    api_key = os.getenv("OPENALEX_API_KEY")
+
+    headers = (
+        {"Authorization": f"Bearer {api_key}"}
+        if api_key else {}
+    )
+
+    recovered = 0
+
+    for paper in papers:
+
+        if (paper.get("abstract") or "").strip():
+            continue
+
+        original_doi = normalize_doi(paper.get("doi"))
+
+        if not original_doi:
+            continue
+
+        doi = original_doi.split("doi.org/", 1)[-1]
+
+        candidates = [doi]
+
+        # IMF publications may have a related publication DOI.
+        # Do not apply this rule to unrelated publishers.
+        if (
+            doi.lower().startswith("10.5089/")
+            and re.search(r"\.a\d{3}$", doi, re.IGNORECASE)
+        ):
+            parent_doi = re.sub(
+                r"\.a\d{3}$",
+                "",
+                doi,
+                flags=re.IGNORECASE
+            )
+            candidates.append(parent_doi)
+
+        for candidate in candidates:
+
+            try:
+                response = requests.get(
+                    f"{OPENALEX_API_URL}/https://doi.org/{candidate}",
+                    headers=headers,
+                    timeout=20
+                )
+
+                if response.status_code == 404:
+                    continue
+
+                if response.status_code in (401, 403, 429):
+                    print(
+                        "[Metadata] OpenAlex access or rate limit "
+                        f"error: {response.status_code}"
+                    )
+                    return papers
+
+                response.raise_for_status()
+                work = response.json()
+
+            except (requests.RequestException, ValueError) as error:
+                print(
+                    f"[Metadata] Lookup failed: {candidate}: "
+                    f"{type(error).__name__}"
+                )
+                continue
+
+            returned_doi = normalize_doi(work.get("doi"))
+            expected_doi = normalize_doi(candidate)
+
+            if (
+                not returned_doi
+                or returned_doi.lower() != expected_doi.lower()
+            ):
+                continue
+
+            abstract = reconstruct_abstract(
+                work.get("abstract_inverted_index")
+            )
+            
+            # Discover additional PDF locations for the exact DOI.
+            # Never borrow PDF links from related but different DOIs.
+            if candidate.lower() == doi.lower() and not paper.get("pdf_url"):
+
+                locations = [
+                    work.get("best_oa_location"),
+                    *(work.get("locations") or []),
+                    work.get("primary_location"),
+                ]
+
+                for location in locations:
+
+                    if not isinstance(location, dict):
+                        continue
+
+                    if location.get("is_oa") is False:
+                        continue
+
+                    discovered_url = location.get("pdf_url")
+
+                    if (
+                        discovered_url
+                        and discovered_url.startswith(("https://", "http://"))
+                    ):
+                        paper["pdf_url"] = discovered_url
+                        paper["pdf_discovery_source"] = "OpenAlex"
+
+                        print(
+                            "[Metadata] PDF URL discovered:",
+                            paper.get("title")
+                        )
+                        break
+
+
+            if not abstract:
+                continue
+
+            is_related_doi = candidate.lower() != doi.lower()
+
+            if is_related_doi:
+                # Check title overlap before linking two DOI records.
+                original_words = set(re.findall(
+                    r"[a-z]{4,}",
+                    (paper.get("title") or "").lower()
+                ))
+
+                related_words = set(re.findall(
+                    r"[a-z]{4,}",
+                    (work.get("display_name") or "").lower()
+                ))
+
+                common = original_words & related_words
+
+                if (
+                    len(common) < 2
+                    or len(common) / max(
+                        1, min(len(original_words), len(related_words))
+                    ) < 0.25
+                ):
+                    continue
+
+                paper["original_title"] = paper.get("title")
+
+                paper["title"] = (
+                    work.get("display_name") or paper.get("title")
+                )
+
+                paper["year"] = (
+                    work.get("publication_year") or paper.get("year")
+                )
+
+            elif paper.get("year") is None:
+                paper["year"] = work.get("publication_year")
+
+            paper["abstract"] = abstract
+            paper["has_abstract"] = True
+
+            # Preserve the original DOI and source.
+            paper["abstract_source"] = "OpenAlex"
+            paper["abstract_source_doi"] = returned_doi
+
+            recovered += 1
+
+            print(
+                f"[Metadata] Abstract recovered: "
+                f"{paper.get('title')}"
+            )
+
+            break
+
+    # Fallback: Recover abstracts from available PDFs
+    for paper in papers:
+
+        # Skip papers that already have an abstract.
+        if (paper.get("abstract") or "").strip():
+            continue
+
+        pdf_url = paper.get("pdf_url")
+
+        if not pdf_url:
+            continue
+        
+        # A component or book chapter may link to a larger
+        # publication PDF rather than its own full text.
+        # Do not automatically assign that publication's abstract.
+        if (
+            paper.get("type") in {"component", "book-chapter"}
+            and paper.get("pdf_discovery_source") == "OpenAlex"
+        ):
+            print(
+                "[Metadata] PDF requires identity verification:",
+                paper.get("title")
+            )
+            continue
+
+        print(
+            "[Metadata] Trying PDF abstract recovery:",
+            paper.get("title")
+        )
+
+        abstract = extract_abstract_from_pdf_url(pdf_url)
+
+        if not abstract:
+            continue
+
+        paper["abstract"] = abstract
+        paper["has_abstract"] = True
+
+        # Keep evidence of where the abstract came from.
+        paper["abstract_source"] = "publisher_pdf"
+        paper["abstract_source_url"] = pdf_url
+
+        recovered += 1
+
+        print(
+            "[Metadata] Abstract recovered from PDF:",
+            paper.get("title")
+        )
+        
+    # FINAL FALLBACK: SEMANTIC SCHOLAR
+    semantic_recovered = 0
+
+    for paper in papers:
+
+        # Skip papers that already have abstracts
+        if (paper.get("abstract") or "").strip():
+            continue
+
+        original_doi = normalize_doi(paper.get("doi"))
+
+        if not original_doi:
+            continue
+
+        doi = original_doi.split("doi.org/", 1)[-1]
+
+        url = (
+            "https://api.semanticscholar.org/graph/v1/paper/"
+            + "DOI:"
+            + quote(doi, safe="")
+        )
+
+        try:
+            response = requests.get(
+                url,
+                params={
+                    "fields": (
+                        "title,year,abstract,"
+                        "externalIds,openAccessPdf"
+                    )
+                },
+                timeout=15
+            )
+
+            if response.status_code == 429:
+                print("[Metadata] Semantic Scholar rate limit reached.")
+                break
+
+            if response.status_code != 200:
+                continue
+
+            data = response.json()
+
+            # Automatic identity check: exact DOI match
+            returned_doi = (
+                data.get("externalIds") or {}
+            ).get("DOI")
+
+            if not returned_doi:
+                continue
+
+            if (
+                normalize_doi(returned_doi).lower()
+                != original_doi.lower()
+            ):
+                continue
+
+            # First try the API abstract
+            abstract = clean_abstract(data.get("abstract"))
+
+            source = "SemanticScholar"
+
+            # If unavailable, try its open-access PDF
+            if not abstract:
+
+                pdf_data = data.get("openAccessPdf") or {}
+                pdf_url = pdf_data.get("url")
+
+                if pdf_url:
+                    abstract = extract_abstract_from_pdf_url(
+                        pdf_url
+                    )
+
+                    if abstract:
+                        source = "SemanticScholar_PDF"
+
+                        if not paper.get("pdf_url"):
+                            paper["pdf_url"] = pdf_url
+
+            if not abstract:
+                continue
+
+            # Update the existing paper
+            paper["abstract"] = abstract
+            paper["has_abstract"] = True
+            paper["abstract_source"] = source
+            paper["abstract_source_doi"] = original_doi
+
+            if paper.get("year") is None:
+                paper["year"] = data.get("year")
+
+            recovered += 1
+            semantic_recovered += 1
+
+            print(
+                "[Metadata] Abstract recovered:",
+                paper.get("title")
+            )
+
+            # Small delay to reduce API throttling
+            time.sleep(1)
+
+        except (requests.RequestException, ValueError) as error:
+            print(
+                "[Metadata] Semantic Scholar lookup failed:",
+                type(error).__name__
+            )
+            continue
+
+    print(f"[Metadata] Total abstracts recovered: {recovered}")
 
     return papers

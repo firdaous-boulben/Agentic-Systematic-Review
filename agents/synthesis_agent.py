@@ -30,8 +30,7 @@ Analyze ONE extracted academic study for a systematic review.
 Produce a concise, evidence-based analytical summary covering:
 1. Research objective and context.
 2. Study design and methods.
-3. Digital twin application and healthcare domain.
-4. Main findings and reported outcomes.
+3. Topic-specific variables, methods and outcomes relevant to the research question.4. Main findings and reported outcomes.
 5. Challenges and limitations.
 6. Missing or insufficiently reported information.
 7. Methodological quality, using only the supplied appraisal.
@@ -74,19 +73,32 @@ research question, and approved protocol.
 
 ORGANIZATION:
 
-Adapt the structure to the actual topic. Use relevant
-sections such as:
-- Overview of the Evidence
-- Main Research Themes
-- Methods and Approaches
-- Comparison of Findings
-- Critical Quality Assessment
-- Research Gaps
-- Limitations of the Available Evidence
-- Future Research Directions
+Write a scientific synthesis with these Markdown headings:
 
-Do not force irrelevant sections or dimensions into
-the synthesis.
+### Comparative Findings
+Compare the main findings across the included studies.
+Identify agreements, disagreements, and differences
+in reported outcomes.
+
+### Discussion
+Interpret the findings in relation to the research question.
+Compare methodological approaches and explain how study
+quality affects the interpretation of the evidence.
+Identify research gaps and implications.
+
+### Limitations of the Evidence
+Explain limitations supported by the included studies,
+including methodological weaknesses, missing information,
+and limitations in the available evidence.
+
+CITATION RULES:
+- Each study has a citation_id.
+- Cite studies using [1], [2], etc.
+- Use only citation IDs supplied in the study summaries.
+- Never invent references, results, or statistics.
+- Every substantive finding must be supported by a study.
+- Do not write an abstract, introduction, or bibliography.
+- Avoid repeating the same findings across sections.
 
 EVIDENCE AND TRACEABILITY:
 
@@ -402,6 +414,7 @@ def run_synthesis_agent(state):
         study_summary = response_to_text(response)
 
         study_summaries.append({
+            "citation_id": index + 1,
             "title": paper.get("title"),
             "authors": paper.get("authors", []),
             "year": paper.get("year"),

@@ -2,6 +2,7 @@
 import os
 import json
 import hashlib
+import re
 from pathlib import Path
 from collections import Counter
 
@@ -20,7 +21,7 @@ parser = JsonOutputParser()
 
 BATCH_SIZE = 5
 CACHE_PATH = Path("data/processed/screening_cache.json")
-PROMPT_VERSION = "dual-review-v2"
+PROMPT_VERSION = "dual-review-v3-compact"
 
 VALID_DECISIONS = {"Include", "Exclude", "Uncertain"}
 
@@ -114,7 +115,33 @@ def get_paper_id(paper, index):
         or paper.get("title")
         or f"paper_{index}"
     )
+def is_standalone_figure(paper):
+    """
+    Identify standalone figure records, not research papers.
 
+    Conservative rule:
+    - Crossref type must be 'component'.
+    - Title must explicitly begin with Figure or Fig.
+    """
+
+    paper_type = str(
+        paper.get("type") or ""
+    ).strip().lower()
+
+    title = " ".join(
+        str(paper.get("title") or "").split()
+    )
+
+    return (
+        paper_type == "component"
+        and bool(
+            re.match(
+                r"^(?:Figure|Fig\.?)\s*\d",
+                title,
+                flags=re.IGNORECASE
+            )
+        )
+    )
 
 def check_publication_year(paper, state):
     """
@@ -167,148 +194,87 @@ def check_publication_year(paper, state):
         return None
 
 
-# Reviewer A: Strict eligibility assessment
+# Shared input structure for both reviewers
+SCREENING_HUMAN_PROMPT = """
+Research topic: {topic}
+Research question: {research_question}
+Inclusion criteria: {inclusion_criteria}
+Exclusion criteria: {exclusion_criteria}
 
+Papers:
+{papers_json}
+
+Assess every paper.
+Return exactly one result per supplied paper_id.
+"""
+
+
+# Reviewer A: Strict eligibility assessment
 reviewer_a_prompt = ChatPromptTemplate.from_messages([
     (
         "system",
         """
-You are Reviewer A, conducting independent title and abstract
-screening for a systematic literature review.
+You are Reviewer A, an independent title and abstract screener.
 
-YOUR APPROACH: STRICT ELIGIBILITY ASSESSMENT.
+Apply all supplied inclusion and exclusion criteria.
 
-For every paper:
+Rules:
+- Include: All required criteria are supported by the evidence.
+- Exclude: Evidence clearly violates at least one criterion.
+- Uncertain: Evidence is insufficient to establish eligibility.
 
-- Examine each inclusion criterion explicitly.
-- Identify any clearly violated exclusion criterion.
-- Require evidence in the title or abstract before considering
-  a criterion satisfied.
-- Do not infer empirical evaluation, methodology, or outcomes
-  that are not reported.
-- If a required criterion cannot be verified, use Uncertain
-  rather than assuming it is satisfied.
+Do not invent missing information.
+Use only the supplied paper information.
+Give a brief evidence-based reason (maximum 20 words).
 
-Decision rules:
-
-- Include: The available evidence supports all required criteria.
-- Exclude: At least one criterion is clearly not met.
-- Uncertain: There is insufficient information to make a
-  reliable decision.
-
-Apply the supplied criteria exactly as written.
-Do not invent information.
-Do not assume another reviewer has assessed the papers.
-
-Return valid JSON only, using this structure:
-
+Return ONLY valid JSON:
 {{
   "results": [
     {{
-      "paper_id": "the supplied paper ID",
-      "decision": "Include, Exclude, or Uncertain",
-      "reason": "Evidence-based justification"
+      "paper_id": "ID",
+      "decision": "Include",
+      "reason": "Brief evidence-based justification"
     }}
   ]
 }}
 """
     ),
-    (
-        "human",
-        """
-Research topic:
-{topic}
-
-Research question:
-{research_question}
-
-Inclusion criteria:
-{inclusion_criteria}
-
-Exclusion criteria:
-{exclusion_criteria}
-
-Papers to assess:
-{papers_json}
-
-Assess every paper independently.
-Return exactly one result for each supplied paper.
-"""
-    )
+    ("human", SCREENING_HUMAN_PROMPT)
 ])
 
 
-# Reviewer B: Research relevance and evidence assessment
-
+# Reviewer B: Independent relevance assessment
 reviewer_b_prompt = ChatPromptTemplate.from_messages([
     (
         "system",
         """
-You are Reviewer B, an independent academic reviewer conducting
-title and abstract screening for a systematic literature review.
+You are Reviewer B, an independent academic screener.
 
-YOUR APPROACH: RESEARCH RELEVANCE AND EVIDENCE ASSESSMENT.
+Apply the same supplied inclusion and exclusion criteria.
+Focus on research relevance and available evidence.
 
-For every paper:
+Rules:
+- Include: Available evidence supports eligibility.
+- Exclude: Evidence clearly demonstrates a criterion violation.
+- Uncertain: Important details are missing or require full-text review.
 
-- Evaluate its relevance to the research question.
-- Examine whether the study addresses the intended review scope.
-- Distinguish between evidence that a criterion is not met
-  and information that is simply missing from the abstract.
-- Consider whether methodological or empirical details may
-  require examination of the full text.
-- Do not exclude a paper solely because its abstract is brief
-  or incomplete when eligibility cannot be established.
+Do not reject a paper simply because its abstract is incomplete.
+Do not invent methods, outcomes, or missing information.
+Give a brief evidence-based reason (maximum 20 words).
 
-Decision rules:
-
-- Include: The available evidence supports the eligibility criteria.
-- Exclude: The available evidence clearly establishes that the
-  paper is outside the review scope or violates a criterion.
-- Uncertain: Eligibility cannot be reliably established from
-  the available information.
-
-Apply exactly the same supplied inclusion and exclusion criteria
-as Reviewer A. Do not relax, modify, or ignore the protocol.
-
-Do not invent information.
-Do not assume another reviewer has assessed the papers.
-
-Return valid JSON only, using this structure:
-
+Return ONLY valid JSON:
 {{
   "results": [
     {{
-      "paper_id": "the supplied paper ID",
-      "decision": "Include, Exclude, or Uncertain",
-      "reason": "Evidence-based justification"
+      "paper_id": "ID",
+      "decision": "Include",
+      "reason": "Brief evidence-based justification"
     }}
   ]
 }}
 """
     ),
-    (
-        "human",
-        """
-Research topic:
-{topic}
-
-Research question:
-{research_question}
-
-Inclusion criteria:
-{inclusion_criteria}
-
-Exclusion criteria:
-{exclusion_criteria}
-
-Papers to assess:
-{papers_json}
-
-Assess every paper independently.
-Return exactly one result for each supplied paper.
-"""
-    )
+    ("human", SCREENING_HUMAN_PROMPT)
 ])
 
 
@@ -362,9 +328,8 @@ def assess_batch(batch, state, reviewer_id, cache):
             "title": paper.get("title", ""),
             "abstract": paper.get("abstract", ""),
             "year": paper.get("year"),
-            "authors": paper.get("authors", []),
+            "type": paper.get("type", []),
             "journal": paper.get("journal", ""),
-            "source": paper.get("source", ""),
         }
         for paper, _, paper_id, _ in uncached_papers
     ]
@@ -490,7 +455,7 @@ def assess_batch(batch, state, reviewer_id, cache):
 
             if is_rate_limit_error(error):
 
-                if attempt < max_retries:
+                if attempt < max_retries and "tokens per day" not in str(error).lower():
 
                     wait_time = 6 * (attempt + 1)
 
@@ -717,6 +682,23 @@ def run_screening_agent(state, max_papers=None):
                 "screening_reason": (
                     "Publication year is outside the configured "
                     "publication year range."
+                ),
+                "dual_screening_status": "deterministic_exclusion",
+            })
+
+            continue
+        
+        # Symbolic screening: exclude standalone figures.
+        # This requires no LLM calls.
+        if is_standalone_figure(paper):
+
+            deterministic_exclusions.append({
+                **paper,
+                "screening_paper_id": paper_id,
+                "screening_decision": "Exclude",
+                "screening_reason": (
+                    "Standalone figure record, not a "
+                    "complete research study."
                 ),
                 "dual_screening_status": "deterministic_exclusion",
             })

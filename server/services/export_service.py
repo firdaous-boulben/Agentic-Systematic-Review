@@ -4,6 +4,8 @@ from pathlib import Path
 from html import escape
 
 import markdown
+from tools.manuscript_generator import generate_manuscript
+
 from bs4 import BeautifulSoup, NavigableString, Tag
 
 from reportlab.lib import colors
@@ -242,8 +244,32 @@ def _add_pdf_footer(canvas, document):
 
 
 def export_pdf(review_id: str, review: dict) -> Path:
-    """Generate a PDF from the existing Markdown report."""
-    content = _read_report(review)
+    """Generate the scientific manuscript PDF."""
+
+    # Ensure scientific results are available.
+    if (
+        not review.get("extracted_data")
+        or not review.get("synthesis")
+    ):
+        raise ValueError(
+            "Scientific manuscript requires completed "
+            "extraction and synthesis."
+        )
+
+    # Generate the scientific manuscript.
+    manuscript_path = generate_manuscript(
+        review,
+        output_path=str(
+            _review_export_dir(review_id)
+            / "systematic_review_manuscript.md"
+        )
+    )
+
+    # Read the manuscript instead of the technical report.
+    content = Path(manuscript_path).read_text(
+        encoding="utf-8"
+    )
+
     soup = _markdown_to_soup(content)
 
     output = _review_export_dir(review_id) / "systematic_review_report.pdf"

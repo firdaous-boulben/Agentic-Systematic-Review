@@ -265,7 +265,7 @@ def approval_router(state: ReviewState):
 def eligibility_router(state: ReviewState):
     status = state.get("current_stage")
 
-    if status == "eligibility_completed":
+    if status in ["eligibility_completed", "extraction_retry_queued"]:
         if state.get("full_text_eligible_papers"):
             return "extract"
 

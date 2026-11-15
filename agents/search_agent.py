@@ -10,7 +10,8 @@ from config.llm import get_llm
 from tools.academic_search import (
     search_openalex,
     search_crossref,
-    normalize_doi
+    normalize_doi,
+    enrich_missing_abstracts
 )
 
 from server.utils.logging import add_execution_logs
@@ -328,6 +329,9 @@ def run_search_agent(state):
 
     # Deduplicate and merge records across sources
     unique_papers = deduplicate_papers(all_papers)
+    
+    # Recover missing abstracts without using Groq
+    unique_papers = enrich_missing_abstracts(unique_papers)
 
     print("\n[Search Agent] Search completed.")
     print("OpenAlex retrieved:", source_counts["OpenAlex"])

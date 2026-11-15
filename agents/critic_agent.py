@@ -9,7 +9,7 @@ from server.utils.logging import add_execution_logs
 load_dotenv()
 
 # Keep the critic's response concise.
-llm = get_llm(max_tokens=3000)
+llm = get_llm(max_tokens=800, reasoning_effort="low")
 
 
 def compact_value(value, max_chars=250, max_items=4):

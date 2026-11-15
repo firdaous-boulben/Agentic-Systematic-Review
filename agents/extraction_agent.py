@@ -158,7 +158,7 @@ def find_pdf(paper):
     return None
 
 
-def retrieve_paper_evidence(paper, retriever):
+def retrieve_paper_evidence(paper, retriever, protocol=None):
     """Retrieve relevant passages from one specific paper."""
 
     pdf_path = find_pdf(paper)
@@ -168,12 +168,27 @@ def retrieve_paper_evidence(paper, retriever):
 
     filename = os.path.basename(pdf_path)
 
+    # Use research-specific dimensions from the protocol.
+    dimensions = (protocol or {}).get(
+        "extraction_dimensions", []
+    ) or []
+
+    if isinstance(dimensions, str):
+        dimensions = [dimensions]
+
+    if isinstance(dimensions, dict):
+        dimensions = list(dimensions.keys())
+
+    dimension_text = "; ".join(
+        str(d) for d in dimensions[:8]
+    ) or "Main research variables and outcomes"
+
     queries = [
         f"{paper.get('title')}. Research objective, context, "
         "study design, participants and sample.",
 
-        f"{paper.get('title')}. Recommendation techniques, "
-        "explainability methods and datasets.",
+        f"{paper.get('title')}. Methods, data and "
+        f"topic-specific dimensions: {dimension_text}.",
 
         f"{paper.get('title')}. Evaluation metrics, results, "
         "main findings and limitations."
@@ -207,7 +222,8 @@ def extract_paper_information(paper, retriever=None, protocol=None):
 
     passages = retrieve_paper_evidence(
         paper,
-        retriever
+        retriever,
+        protocol=protocol
     )
 
     if passages:

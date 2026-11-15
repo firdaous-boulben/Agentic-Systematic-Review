@@ -380,14 +380,133 @@ def assess_paper_full_text(paper, retriever, protocol, topic):
         f"[Eligibility] Loaded {len(pages)} pages from {filename}"
     )
 
-    # Divide pages into manageable batches.
+    # OPTIMIZATION: LOCAL RAG EVIDENCE SELECTION
+
+    pages_for_llm = pages
+
+    use_rag = os.getenv(
+        "ELIGIBILITY_RAG_ENABLED", "1"
+    ) == "1"
+
+    if use_rag and len(pages) > 12:
+
+        criteria = [
+            str(c).strip()
+            for c in inclusion + exclusion
+            if str(c).strip()
+        ]
+
+        # Search for criterion-specific and methodological evidence.
+        queries = criteria + [
+            "Research methodology, study design, dataset and sample",
+            "Main results, findings and conclusions"
+        ]
+
+        try:
+            page_lookup = {
+                int(page["page_number"]): page
+                for page in pages
+            }
+
+            retrieved_groups = []
+
+            for query in queries:
+
+                results = retriever.search(
+                    query=query,
+                    top_k=3,
+                    source_pdf=filename
+                )
+
+                if not results:
+                    raise ValueError(
+                        "No indexed passages for a query"
+                    )
+
+                retrieved_groups.append(results)
+
+            selected_numbers = []
+
+            def add_page(number):
+                try:
+                    number = int(number)
+                except (TypeError, ValueError):
+                    return
+
+                if (
+                    number in page_lookup
+                    and number not in selected_numbers
+                ):
+                    selected_numbers.append(number)
+
+            # Keep the opening pages and the final page.
+            for page in pages[:2]:
+                add_page(page["page_number"])
+
+            add_page(pages[-1]["page_number"])
+
+            # Preserve the highest-ranked hit for every query.
+            for results in retrieved_groups:
+                add_page(results[0].get("page_number"))
+
+            max_pages = max(12, len(queries) + 3)
+
+            # Add additional relevant pages.
+            for rank in range(1, 3):
+
+                for results in retrieved_groups:
+
+                    if len(selected_numbers) >= max_pages:
+                        break
+
+                    if rank < len(results):
+                        add_page(
+                            results[rank].get("page_number")
+                        )
+
+            # Use RAG only if sufficient page coverage exists.
+            # Otherwise, retain the original full-text approach.
+            if len(selected_numbers) >= 6:
+
+                pages_for_llm = sorted(
+                    [
+                        page_lookup[number]
+                        for number in selected_numbers
+                    ],
+                    key=lambda page: page["page_number"]
+                )
+
+                print(
+                    f"[Eligibility] RAG selected "
+                    f"{len(pages_for_llm)}/{len(pages)} pages "
+                    f"for {filename}"
+                )
+
+            else:
+                print(
+                    "[Eligibility] Insufficient RAG coverage. "
+                    "Using all pages."
+                )
+
+        except Exception as error:
+
+            print(
+                "[Eligibility] RAG selection unavailable. "
+                "Using all pages:",
+                type(error).__name__
+            )
+
+            pages_for_llm = pages
+
+    # Preserve the existing batch size and workflow.
     batch_size = 3
 
     page_batches = [
-        pages[i:i + batch_size]
-        for i in range(0, len(pages), batch_size)
+        pages_for_llm[i:i + batch_size]
+        for i in range(0, len(pages_for_llm), batch_size)
     ]
-
+    
+    
     all_evidence = []
 
     # Extract evidence from every batch.
