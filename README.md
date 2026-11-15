@@ -36,6 +36,7 @@ ReviewAI is an AI-powered application that automates systematic literature revie
 - Node.js and npm
 - Groq API key
 - Internet connection
+- Openalex API
 
 ### Step 1 — Clone the repository
 
