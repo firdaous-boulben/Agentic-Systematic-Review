@@ -142,12 +142,11 @@ Scientific PDF
 
 ## Project Documentation & Demo
 
-For a detailed explanation of the system's architecture, implementation, workflow, and results, see the [`documentation/`](./docs/) folder.
+For more details about ReviewAI, you can explore the following resources:
 
-The folder contains:
+- 📄 **[Project Report](./ReviewAI_Project_Report.pdf)** — Detailed documentation covering the system architecture, implementation, methodology, results, and limitations.
 
-- **Project Report:** Technical implementation, methodology, results, and limitations.
-- **Video Demo:** A walkthrough demonstrating the application's main features and complete workflow.
+- 🎥 **[Video Demo](./docs/)** — A demonstration of the application's main features and complete systematic review workflow.
 
 ## 6. Token Monitoring
 
