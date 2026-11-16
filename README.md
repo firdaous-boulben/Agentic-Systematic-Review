@@ -144,9 +144,9 @@ Scientific PDF
 
 For more details about ReviewAI, you can explore the following resources:
 
-- 📄 **[Project Report](./ReviewAI_Project_Report.pdf)** — Detailed documentation covering the system architecture, implementation, methodology, results, and limitations.
+- 📄 **[Project Report](./docs/ReviewAI_Project_Report.pdf)** — Detailed documentation covering the system architecture, implementation, methodology, results, and limitations.
 
-- 🎥 **[Video Demo](./docs/)** — A demonstration of the application's main features and complete systematic review workflow.
+- 🎥 **[Video Demo](./docs/ReviewAI_Video_Demo.mp4)** — A demonstration of the application's main features and complete systematic review workflow.
 
 ## 6. Token Monitoring
 
@@ -199,13 +199,13 @@ Agentic-Systematic-Review/
 ├── client/          # React frontend
 ├── config/          # LLM configuration
 ├── data/            # PDFs, checkpoints, RAG data
+├── docs/            # Report and Video demo
 ├── rag/             # Indexing and retrieval
 ├── server/          # FastAPI backend
 ├── tools/           # Search, PDF and report utilities
 ├── workflow/        # LangGraph orchestration
 │
 ├── requirements.txt
-├── show_token_usage.py
 └── README.md
 ```
 
